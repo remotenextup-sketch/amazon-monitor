@@ -1,9 +1,6 @@
-const { google } = require('googleapis');
+import { google } from 'googleapis';
 
-/**
- * Google Sheets管理クラス
- */
-class GoogleSheetsManager {
+export default class GoogleSheetsManager {
   constructor(credentials) {
     this.credentials = credentials;
     this.sheetsClient = null;
@@ -16,120 +13,61 @@ class GoogleSheetsManager {
         credentials: this.credentials,
         scopes: ['https://www.googleapis.com/auth/spreadsheets'],
       });
-
       this.sheetsClient = google.sheets({ version: 'v4', auth });
       this.spreadsheetId = spreadsheetId;
-      console.log('✓ Google Sheets接続成功');
+      console.log('✓ Google Sheets 接続成功');
       return true;
     } catch (error) {
-      console.error('✗ Google Sheets接続失敗:', error.message);
+      console.error('✗ Google Sheets 接続失敗:', error.message);
       return false;
-    }
-  }
-
-  /**
-   * 複数のデータを一括記録
-   * dataArray の各要素は [timestamp, 商品名, ASIN, Amazon商品名, 価格, ベストセラーバッジ, 小カテランキング, 大カテランキング, レビュー数, ステータス, 危険度スコア]
-   */
-async recordBatchData(sheetName, dataArray) {
-  try {
-    const values = dataArray.map(d => [
-      new Date().toISOString(),       // タイムスタンプ
-      d.productName,                  // 商品名
-      d.asin,                         // ASIN
-      d.amazonProductName,            // Amazon商品名
-      d.price,                        // 価格
-      d.bestsellerBadge,              // ベストセラーバッジ
-      d.smallCategoryRank,            // 小カテランキング
-      d.largeCategoryRank,            // 大カテランキング
-      d.reviewCount,                  // レビュー数
-      d.status || '正常',             // ステータス
-      d.score || 0,                   // スコア
-      d.type || '自社'                // タイプ
-    ]);
-
-    await this.sheetsClient.spreadsheets.values.append({
-      spreadsheetId: this.spreadsheetId,
-      range: `${sheetName}!A:L`,
-      valueInputOption: 'RAW',
-      resource: { values }
-    });
-
-    console.log(`✓ ${dataArray.length}件のデータを履歴に記録成功`);
-    return true;
-  } catch (error) {
-    console.error('✗ 一括記録失敗:', error.message);
-    return false;
-  }
-}
-
-  async getLastRecord(sheetName, asin) {
-    try {
-      const response = await this.sheetsClient.spreadsheets.values.get({
-        spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:K`
-      });
-
-      const rows = response.data.values || [];
-      if (rows.length === 0) return null;
-
-      for (let i = rows.length - 1; i >= 1; i--) {
-        if (rows[i][2] === asin) {
-          return {
-            timestamp: rows[i][0],
-            productName: rows[i][1],
-            asin: rows[i][2],
-            amazonProductName: rows[i][3],
-            price: rows[i][4],
-            bestsellerBadge: rows[i][5],
-            smallCategoryRank: rows[i][6],
-            largeCategoryRank: rows[i][7],
-            reviewCount: rows[i][8],
-            status: rows[i][9] || 'OK',
-            dangerScore: rows[i][10] || 0
-          };
-        }
-      }
-      return null;
-    } catch (error) {
-      console.error('✗ データ取得失敗:', error.message);
-      return null;
     }
   }
 
   async getProductConfig() {
     try {
+      // 「設定」シートの A列:商品名, B列:自社ASIN, C列:競合1, D列:競合2
       const response = await this.sheetsClient.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: '設定!A:E'
+        range: '設定!A:D' 
       });
-
       const rows = response.data.values || [];
-      const products = {};
-
+      const config = [];
       for (let i = 1; i < rows.length; i++) {
-        if (!rows[i][0]) continue;
-
-        const productName = rows[i][0];
-        const ownAsin = rows[i][1];
-        const competitorAsins = [];
-
-        if (rows[i][2]) competitorAsins.push(rows[i][2]);
-        if (rows[i][3]) competitorAsins.push(rows[i][3]);
-
-        products[productName] = {
-          asin: ownAsin,
-          competitors: competitorAsins
-        };
+        if (!rows[i][1]) continue;
+        config.push({
+          productName: rows[i][0],
+          ownAsin: rows[i][1],
+          competitors: rows.slice(i, i+1)[0].slice(2).filter(Boolean)
+        });
       }
-
-      console.log(`✓ 設定取得成功 (${Object.keys(products).length}商品)`);
-      return products;
+      return config;
     } catch (error) {
       console.error('✗ 設定取得失敗:', error.message);
-      return {};
+      return [];
+    }
+  }
+
+  async recordBatchData(sheetName, dataArray) {
+    try {
+      const values = dataArray.map(d => [
+        new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+        d.productName,
+        d.asin,
+        d.title,
+        d.price,
+        d.hasBestSeller ? 'あり' : 'なし',
+        d.rankInfo || '',
+        d.status || '正常'
+      ]);
+      await this.sheetsClient.spreadsheets.values.append({
+        spreadsheetId: this.spreadsheetId,
+        range: `${sheetName}!A:H`,
+        valueInputOption: 'RAW',
+        resource: { values }
+      });
+      console.log(`✓ ${dataArray.length}件のデータを記録しました`);
+    } catch (error) {
+      console.error('✗ データ記録失敗:', error.message);
     }
   }
 }
-
-module.exports = GoogleSheetsManager;
