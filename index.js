@@ -6,11 +6,19 @@ import ChatworkNotifier from './chatwork-notifier.js';
 async function monitor() {
   console.log('🚀 Amazon Monitor 起動');
 
-  // 1. 各クラスの初期化
-  const gsm = new GoogleSheetsManager({
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  });
+  let gsm;
+  try {
+    // SecretsからJSONをパース
+    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    
+    gsm = new GoogleSheetsManager({
+      client_email: serviceAccount.client_email,
+      private_key: serviceAccount.private_key,
+    });
+  } catch (err) {
+    console.error('❌ Google Service Account Key のパースに失敗しました。JSON形式が正しいか確認してください。');
+    return;
+  }
 
   const scraper = new AmazonScraper();
   const notifier = new ChatworkNotifier(
@@ -20,7 +28,7 @@ async function monitor() {
 
   try {
     // 2. 準備（スプレッドシート接続 ＆ ブラウザ起動）
-    if (!(await gsm.initialize(process.env.GOOGLE_SHEET_ID))) return;
+    if (!(await gsm.initialize(process.env.GOOGLE_SHEETS_ID))) return;
     if (!(await scraper.initialize())) return;
 
     // 3. 設定シートから監視対象を取得
@@ -32,14 +40,12 @@ async function monitor() {
     for (const item of productsConfig) {
       console.log(`--- 監視対象: ${item.productName} ---`);
 
-      // 自社と競合をまとめる
       const targets = [
         { asin: item.ownAsin, type: '自社' },
         ...item.competitors.map(asin => ({ asin, type: '競合' }))
       ];
 
       for (const target of targets) {
-        // AmazonScraper.js の高度な取得ロジックを使用
         const data = await scraper.getProductInfo(target.asin);
 
         if (data) {
@@ -53,14 +59,7 @@ async function monitor() {
 
           // 5. 異常検知ロジック
           if (target.type === '自社' && data.bestsellerBadge === 'No') {
-            // スプレッドシート側の「前回の状態」と比較して通知するのが理想ですが、
-            // まずは「バッジがない＝アラート」として処理
             alerts.push(`🚨【ベストセラー消失】${item.productName} (${target.asin})`);
-          }
-
-          // 競合が安すぎる場合の例（必要に応じて）
-          if (target.type === '競合' && parseInt(data.price) < 1000 && data.price !== '0') {
-            alerts.push(`💰【安値警告】競合が1000円を切りました: ${target.asin}`);
           }
         }
         // 連続アクセス対策
@@ -82,7 +81,6 @@ async function monitor() {
   } catch (error) {
     console.error('❌ メインプロセスでエラー発生:', error);
   } finally {
-    // 8. 後片付け
     await scraper.close();
     console.log('🏁 すべてのプロセスが終了しました');
   }
