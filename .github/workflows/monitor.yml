@@ -5,21 +5,19 @@ on:
     branches:
       - main
   schedule:
-    # 毎時0分に実行 (UTC)
+    # 毎時0分に実行
     - cron: '0 * * * *'
-  workflow_dispatch: # 手動実行ボタンを有効化
+  workflow_dispatch:
 
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
-    
-    # 万が一の無限ループやAmazonの応答遅延による課金防止
     timeout-minutes: 30
 
     env:
-      GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
-      GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
-      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      # Secretsの名前に完全一致させています
+      GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+      GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
       CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
       CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
       TZ: 'Asia/Tokyo'
@@ -32,14 +30,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # エラー回避のため cache 設定を一旦外しています
 
       - name: Install dependencies
-        # package-lock.jsonがなくても動くように npm install に変更
         run: npm install
 
       - name: Install Playwright Browsers with Deps
-        # Linuxに必要なシステムライブラリを含めてインストール
         run: npx playwright install --with-deps chromium
 
       - name: Run Amazon Monitor
