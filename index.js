@@ -2,130 +2,188 @@ const AmazonScraper = require('./amazon-scraper');
 const GoogleSheetsManager = require('./google-sheets-manager');
 const ChatworkNotifier = require('./chatwork-notifier');
 
+// 環境変数から設定を読み込み
 const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
 const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
 const CHATWORK_API_TOKEN = process.env.CHATWORK_API_TOKEN;
 const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID;
 
+/**
+ * メイン処理
+ */
 async function main() {
   console.log('\n========================================');
   console.log('🚀 Amazon Product Monitor 開始');
   console.log(`⏰ ${new Date().toISOString()}`);
   console.log('========================================\n');
 
+  // 環境変数の確認
   if (!GOOGLE_SHEETS_ID || !GOOGLE_SERVICE_ACCOUNT_KEY || !CHATWORK_API_TOKEN || !CHATWORK_ROOM_ID) {
-    console.error('❌ 環境変数が不足しています');
+    console.error('❌ 環境変数が不足しています。以下を確認してください：');
+    console.error('  - GOOGLE_SHEETS_ID');
+    console.error('  - GOOGLE_SERVICE_ACCOUNT_KEY');
+    console.error('  - CHATWORK_API_TOKEN');
+    console.error('  - CHATWORK_ROOM_ID');
     process.exit(1);
   }
 
-  const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
-  const sheetsManager = new GoogleSheetsManager(credentials);
-  await sheetsManager.initialize(GOOGLE_SHEETS_ID);
-  const notifier = new ChatworkNotifier(CHATWORK_API_TOKEN, CHATWORK_ROOM_ID);
-  const scraper = new AmazonScraper();
-  await scraper.initialize();
+  let scraper = null;
+  let sheetsManager = null;
+  let notifier = null;
 
-  const productConfig = await sheetsManager.getProductConfig();
-  if (Object.keys(productConfig).length === 0) return;
+  try {
+    // 初期化
+    console.log('📝 初期化中...\n');
 
-  const allAsins = [];
-  const asinToProduct = {};
-  for (const [name, config] of Object.entries(productConfig)) {
-    allAsins.push(config.asin);
-    asinToProduct[config.asin] = { name, type: 'own' };
-    for (const cAsin of config.competitors) {
-      allAsins.push(cAsin);
-      asinToProduct[cAsin] = { name, type: 'competitor' };
-    }
-  }
+    // Google Sheetsマネージャーを初期化
+    const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
+    sheetsManager = new GoogleSheetsManager(credentials);
+    await sheetsManager.initialize(GOOGLE_SHEETS_ID);
 
-  const allData = await scraper.getMultipleProducts(allAsins);
+    // Chatwork通知を初期化
+    notifier = new ChatworkNotifier(CHATWORK_API_TOKEN, CHATWORK_ROOM_ID);
 
-  const recordsToAdd = [];
-  const notifications = [];
+    // Amazon スクレイパーを初期化
+    scraper = new AmazonScraper();
+    await scraper.initialize();
 
-  for (const asin of allAsins) {
-    const data = allData[asin];
-    if (!data) continue;
+    // 設定から商品情報を取得
+    console.log('\n📋 設定を読み込み中...');
+    const productConfig = await sheetsManager.getProductConfig();
 
-    const productInfo = asinToProduct[asin];
-    const timestamp = new Date().toISOString();
-
-    // ステータスと危険度スコア
-    const status = data.bestsellerBadge === 'No' ? '⚠️ ベストセラー外れ' : 'OK';
-    let dangerScore = 0;
-    if (!isNaN(parseInt(data.smallCategoryRank))) {
-      dangerScore += parseInt(data.smallCategoryRank) <= 20 ? 50 : 0;
+    if (Object.keys(productConfig).length === 0) {
+      console.warn('⚠️  監視対象の商品が見つかりません。設定シートを確認してください。');
+      return;
     }
 
-    recordsToAdd.push([
-      timestamp,
-      productInfo.name,
-      asin,
-      data.productName,
-      data.price,
-      data.bestsellerBadge,
-      data.smallCategoryRank,
-      data.largeCategoryRank,
-      data.reviewCount,
-      status,
-      dangerScore
-    ]);
+    console.log(`✓ ${Object.keys(productConfig).length}個の商品を検出\n`);
 
-    // 通知判定（自社商品のみ）
-    if (productInfo.type === 'own') {
-      const prevRecord = await sheetsManager.getLastRecord('履歴', asin);
+    // すべてのASINを収集
+    const allAsins = [];
+    const asinToProduct = {}; // ASIN → 商品情報のマッピング
 
-      // ベストセラー外れ通知
-      if (prevRecord && prevRecord.bestsellerBadge === 'Yes' && data.bestsellerBadge === 'No') {
-        notifications.push(
-          `[info][title]⚠️ ベストセラーバッジ喪失[/title]
-【${productInfo.name}】のベストセラーバッジが外れました。
-📊 ランキング変動: 前回 ${prevRecord.smallCategoryRank}位 → 現在 ${data.smallCategoryRank}位
-⚡ 早急な対応をお勧めします。[/info]`
+    for (const [productName, config] of Object.entries(productConfig)) {
+      allAsins.push(config.asin);
+      asinToProduct[config.asin] = {
+        name: productName,
+        type: '自社'
+      };
+
+      for (const competitorAsin of config.competitors) {
+        allAsins.push(competitorAsin);
+        asinToProduct[competitorAsin] = {
+          name: productName,
+          type: '競合'
+        };
+      }
+    }
+
+    // 商品情報を取得
+    console.log('🔍 Amazon から商品情報を取得中...\n');
+    const allProductData = await scraper.getMultipleProducts(allAsins);
+
+    // データをGoogle Sheetsに記録
+    console.log('\n💾 Google Sheets に記録中...\n');
+    const recordsToAdd = [];
+
+    for (const asin of allAsins) {
+      if (allProductData[asin]) {
+        const productInfo = asinToProduct[asin];
+        const data = allProductData[asin];
+
+        // ステータスとスコア判定（例: ベストセラー外れは危険）
+        let status = '正常';
+        let score = 0;
+
+        if (data.bestsellerBadge === 'No' && productInfo.type === '自社') {
+          status = '危険';
+          score = 100;
+        }
+
+        const record = {
+          asin,
+          productName: productInfo.name,
+          amazonProductName: data.productName,
+          price: data.price,
+          bestsellerBadge: data.bestsellerBadge,
+          smallCategoryRank: data.smallCategoryRank,
+          largeCategoryRank: data.largeCategoryRank,
+          reviewCount: data.reviewCount,
+          status,
+          score,
+          type: productInfo.type
+        };
+
+        recordsToAdd.push(record);
+      }
+    }
+
+    if (recordsToAdd.length > 0) {
+      await sheetsManager.recordBatchData('履歴', recordsToAdd);
+    }
+
+    // 通知判定
+    console.log('\n🔔 通知条件をチェック中...\n');
+
+    for (const [productName, config] of Object.entries(productConfig)) {
+      const ownAsin = config.asin;
+      const currentData = allProductData[ownAsin];
+
+      if (!currentData) continue;
+
+      // 前回のデータを取得
+      const previousData = await sheetsManager.getLastRecord('履歴', ownAsin);
+
+      // ベストセラーバッジが外れた場合
+      if (previousData && previousData.bestsellerBadge === 'Yes' && currentData.bestsellerBadge === 'No') {
+        console.log(`⚠️  【${productName}】ベストセラーバッジが外れました`);
+        await notifier.notifyBestsellerLost(
+          productName,
+          currentData.smallCategoryRank,
+          previousData.smallCategoryRank
         );
       }
 
-      // 競合商品接近通知
-      const config = productConfig[productInfo.name];
-      for (const cAsin of config.competitors) {
-        const competitorData = allData[cAsin];
+      // 競合商品のランキングをチェック
+      for (const competitorAsin of config.competitors) {
+        const competitorData = allProductData[competitorAsin];
         if (!competitorData) continue;
-        const ourRank = parseInt(data.smallCategoryRank);
+
+        const ourRank = parseInt(currentData.smallCategoryRank);
         const competitorRank = parseInt(competitorData.smallCategoryRank);
+
         if (!isNaN(ourRank) && !isNaN(competitorRank)) {
-          const diff = Math.abs(ourRank - competitorRank);
-          if (diff <= 20) {
-            notifications.push(
-              `[info][title]⚠️ 競合商品接近[/title]
-【${productInfo.name}】
-🏆 当社商品: 小カテ ${ourRank}位
-🔴 競合商品: 小カテ ${competitorRank}位 (${competitorData.productName})
-📏 順位差: ${diff}位
-競合商品が20位以内に迫っています。[/info]`
+          const rankDifference = Math.abs(ourRank - competitorRank);
+
+          if (rankDifference <= 20) {
+            console.log(`⚠️  【${productName}】競合商品が接近 (順位差: ${rankDifference}位)`);
+            await notifier.notifyCompetitorApproaching(
+              productName,
+              ourRank,
+              competitorRank,
+              competitorData.productName,
+              rankDifference
             );
           }
         }
       }
     }
-  }
 
-  // シートに記録
-  if (recordsToAdd.length > 0) {
-    await sheetsManager.recordBatchData('履歴', recordsToAdd);
-  }
+    console.log('\n✅ 処理完了\n');
 
-  // 通知送信
-  if (notifications.length > 0) {
-    console.log(`🔔 ${notifications.length}件の通知を送信`);
-    await notifier.sendBatchNotifications(notifications);
+  } catch (error) {
+    console.error('\n❌ エラーが発生しました:', error);
+    process.exit(1);
+  } finally {
+    // クリーンアップ
+    if (scraper) {
+      await scraper.close();
+    }
   }
-
-  console.log('✅ 処理完了');
-  await scraper.close();
 }
 
-main().catch(err => {
-  console.error('Fatal error:', err);
+// エラーハンドリング
+main().catch(error => {
+  console.error('Fatal error:', error);
   process.exit(1);
 });
