@@ -40,7 +40,7 @@ class AmazonScraper {
    * 商品情報を取得
    */
   async getProductInfo(asin) {
-    const context = await this.browser.createContext({
+    const context = await this.browser.newContext({
       userAgent: this.userAgent
     });
     const page = await context.newPage();
