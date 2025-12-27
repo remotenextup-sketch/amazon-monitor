@@ -1,69 +1,15 @@
-// index.js
 import { GoogleSpreadsheet } from 'google-spreadsheet';
-import playwright from 'playwright';
+import AmazonScraper from './amazon-scraper.js';
 import fetch from 'node-fetch';
-import fs from 'fs';
-import path from 'path';
 
-// ==== 環境変数 ====
-const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_ID;
+const creds = JSON.parse(process.env.GOOGLE_CREDS_JSON);
 const CHATWORK_TOKEN = process.env.CHATWORK_TOKEN;
-const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID;
+const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID || 'YOUR_ROOM_ID'; // ChatworkルームID
 
-// ==== Google認証情報 ====
-const CREDENTIALS = JSON.parse(fs.readFileSync(path.resolve('./credentials.json')));
-
-// ==== Amazon 商品スクレイパー ====
-class AmazonScraper {
-  constructor() {}
-  
-  async initBrowser() {
-    this.browser = await playwright.chromium.launch({ headless: true });
-    this.context = await this.browser.newContext();
-    this.page = await this.context.newPage();
-  }
-
-  async closeBrowser() {
-    await this.browser.close();
-  }
-
-  async getProductInfo(asin) {
-    const url = `https://www.amazon.co.jp/dp/${asin}`;
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-    const title = await this.page.locator('#productTitle').textContent().catch(() => '');
-    const price = await this.page.locator('.a-price .a-offscreen').first().textContent().catch(() => '');
-    const rating = await this.page.locator('span[data-hook="rating-out-of-text"]').textContent().catch(() => '');
-    const reviews = await this.page.locator('#acrCustomerReviewText').textContent().catch(() => '');
-    return { title: title?.trim(), price: price?.trim(), rating: rating?.trim(), reviews: reviews?.trim() };
-  }
-}
-
-// ==== Google Spreadsheet 操作 ====
-async function updateSheet(products) {
-  const doc = new GoogleSpreadsheet(SPREADSHEET_ID);
-  await doc.useServiceAccountAuth(CREDENTIALS);
-  await doc.loadInfo();
-  const sheet = doc.sheetsByTitle['履歴'];
-  
-  const rows = products.map(p => ({
-    'タイムスタンプ': new Date().toISOString(),
-    '商品名': p.name,
-    'ASIN': p.asin,
-    '商品名（Amazon）': p.info.title || '',
-    '価格': p.info.price || '',
-    'レビュー数': p.info.reviews || '',
-    'ステータス': p.status || '',
-    'スコア': p.score || '',
-    'タイプ': p.type || ''
-  }));
-  
-  await sheet.addRows(rows);
-}
-
-// ==== Chatwork 通知 ====
 async function sendChatworkMessage(message) {
-  if (!CHATWORK_TOKEN || !CHATWORK_ROOM_ID) return;
-  await fetch(`https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`, {
+  if (!CHATWORK_TOKEN) return;
+  const url = `https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`;
+  await fetch(url, {
     method: 'POST',
     headers: {
       'X-ChatWorkToken': CHATWORK_TOKEN,
@@ -73,31 +19,49 @@ async function sendChatworkMessage(message) {
   });
 }
 
-// ==== メイン ====
-(async () => {
+async function main() {
   console.log('🚀 Amazon Product Monitor 開始');
-  const scraper = new AmazonScraper();
-  await scraper.initBrowser();
+  await sendChatworkMessage('Amazon Monitor 開始しました 🛒');
 
-  // ここで設定シートから自社・競合ASINを取得する想定
-  const products = [
-    { name: '自社商品A', asin: 'B000123456', type: '自社' },
-    { name: '競合商品X', asin: 'B000654321', type: '競合' }
-  ];
+  try {
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID);
+    await doc.useServiceAccountAuth(creds);
+    await doc.loadInfo();
+    console.log('✓ Google Sheets接続成功');
 
-  for (let p of products) {
-    try {
-      p.info = await scraper.getProductInfo(p.asin);
-      p.status = '取得成功';
-      p.score = 100; // 適当にスコア計算
-    } catch (err) {
-      p.status = '取得失敗';
-      p.score = 0;
+    const sheet = doc.sheetsByTitle['履歴'];
+    const monitor = new AmazonScraper();
+    const configSheet = doc.sheetsByTitle['設定'];
+    const products = await configSheet.getRows();
+
+    for (const p of products) {
+      const asins = [p['自社ASIN'], p['競合ASIN1'], p['競合ASIN2']].filter(Boolean);
+      for (const asin of asins) {
+        const data = await monitor.getProductInfo(asin);
+        await sheet.addRow({
+          タイムスタンプ: new Date().toISOString(),
+          商品名: p['商品名'],
+          ASIN: asin,
+          '商品名（Amazon）': data.title,
+          価格: data.price,
+          'ベストセラーバッジ': data.bestSeller,
+          '小カテランキング': data.smallCategoryRank,
+          '大カテランキング': data.largeCategoryRank,
+          'レビュー数': data.reviews,
+          ステータス: data.status,
+          スコア: data.score,
+          タイプ: p['自社ASIN'] === asin ? '自社' : '競合'
+        });
+        console.log(`✓ ${asin} 書き込み完了`);
+      }
     }
+
+    console.log('✅ すべて完了');
+    await sendChatworkMessage('Amazon Monitor 完了 ✅');
+  } catch (err) {
+    console.error('❌ エラーが発生しました:', err);
+    await sendChatworkMessage(`❌ Amazon Monitor エラー:\n${err.message}`);
   }
+}
 
-  await updateSheet(products);
-  await sendChatworkMessage('Amazon Monitor 完了 ✅');
-
-  await scraper.closeBrowser();
-})();
+main();
