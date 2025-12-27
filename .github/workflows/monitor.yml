@@ -1,34 +1,46 @@
-name: Build and Run Amazon Monitor
+name: Amazon Monitor Automation
 
 on:
   push:
     branches:
       - main
   schedule:
+    # 日本時間 (JST) で毎時0分に実行したい場合はそのままでOK
+    # もし特定の時間（例：朝8時）なら UTC 23:00 に設定します
     - cron: '0 * * * *'
+  workflow_dispatch: # ← これを追加するとGitHub画面から手動実行ボタンが出ます
 
 jobs:
-  build-and-run:
+  run-monitor:
     runs-on: ubuntu-latest
+    
+    # タイムアウト設定（Amazonの応答が遅い時に課金を防ぐため30分で強制終了）
+    timeout-minutes: 30
+
     env:
       GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
       GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
       CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+      TZ: 'Asia/Tokyo' # システム時間を日本時間に設定
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4 # 最新版 v4 を使用
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4 # 最新版 v4 を使用
         with:
           node-version: '20'
+          cache: 'npm' # npmのキャッシュを有効にして実行速度をアップ
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci # npm install より高速・厳格な npm ci を推奨
 
-      - name: Install Playwright Browsers
-        run: npx playwright install
+      - name: Install Playwright Browsers with Deps
+        # --with-deps をつけることで Linuxに必要なライブラリを自動インストール
+        run: npx playwright install --with-deps chromium
 
       - name: Run Amazon Monitor
         run: node index.js
