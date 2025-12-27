@@ -1,18 +1,14 @@
 {
   "name": "amazon-monitor",
   "version": "1.0.0",
-  "description": "Amazon Product Monitor with Google Sheets",
-  "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
-  "author": "Your Name",
-  "license": "MIT",
   "dependencies": {
     "google-spreadsheet": "^3.3.0",
-    "playwright": "^1.44.0",
-    "node-fetch": "^3.3.1",
+    "playwright": "^1.46.0",
+    "node-fetch": "^3.3.2",
     "dotenv": "^16.3.1"
   }
 }
