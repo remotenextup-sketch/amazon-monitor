@@ -24,7 +24,7 @@ jobs:
 
       # ③ 依存関係インストール
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       # ④ Playwright ブラウザインストール（※ここが重要）
       - name: Install Playwright browsers
