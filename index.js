@@ -1,92 +1,91 @@
-import { GoogleSpreadsheet } from 'google-spreadsheet';
-import { JWT } from 'google-auth-library';
-import playwright from 'playwright';
-import fetch from 'node-fetch';
+import 'dotenv/config';
+import GoogleSheetsManager from './google-sheets-manager.js';
+import AmazonScraper from './amazon-scraper.js';
+import ChatworkNotifier from './chatwork-notifier.js';
 
-console.log('========================================');
-console.log('🚀 Amazon Product Monitor 開始');
-console.log('========================================');
+async function monitor() {
+  console.log('🚀 Amazon Monitor 起動');
 
-async function run() {
+  // 1. 各クラスの初期化
+  const gsm = new GoogleSheetsManager({
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  });
+
+  const scraper = new AmazonScraper();
+  const notifier = new ChatworkNotifier(
+    process.env.CHATWORK_API_TOKEN,
+    process.env.CHATWORK_ROOM_ID
+  );
+
   try {
-    // 1. Google Sheets 認証設定 (v4以降の書き方)
-    const serviceAccountAuth = new JWT({
-      email: process.env.GOOGLE_CLIENT_EMAIL,
-      key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
+    // 2. 準備（スプレッドシート接続 ＆ ブラウザ起動）
+    if (!(await gsm.initialize(process.env.GOOGLE_SHEET_ID))) return;
+    if (!(await scraper.initialize())) return;
 
-    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID, serviceAccountAuth);
-    await doc.loadInfo();
-    console.log(`📄 Loaded sheet: ${doc.title}`);
-    const sheet = doc.sheetsByIndex[0]; // 最初のシートを取得
+    // 3. 設定シートから監視対象を取得
+    const productsConfig = await gsm.getProductConfig();
+    let allResults = [];
+    let alerts = [];
 
-    // 2. ブラウザ起動 (Stealthに近い設定)
-    const browser = await playwright.chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
-    const page = await context.newPage();
+    // 4. メインループ
+    for (const item of productsConfig) {
+      console.log(`--- 監視対象: ${item.productName} ---`);
 
-    // 3. 商品チェックロジック (例: スプレッドシートからASINを読み込む場合)
-    const rows = await sheet.getRows();
-    let notifications = [];
+      // 自社と競合をまとめる
+      const targets = [
+        { asin: item.ownAsin, type: '自社' },
+        ...item.competitors.map(asin => ({ asin, type: '競合' }))
+      ];
 
-    for (const row of rows) {
-      const asin = row.get('ASIN'); // シートに「ASIN」列がある前提
-      if (!asin) continue;
+      for (const target of targets) {
+        // AmazonScraper.js の高度な取得ロジックを使用
+        const data = await scraper.getProductInfo(target.asin);
 
-      console.log(`🔎 Checking ASIN: ${asin}`);
-      await page.goto(`https://www.amazon.co.jp/dp/${asin}`, { waitUntil: 'networkidle', timeout: 60000 });
+        if (data) {
+          const result = {
+            ...data,
+            asin: target.asin,
+            productName: item.productName,
+            type: target.type
+          };
+          allResults.push(result);
 
-      // ベストセラーバッジと価格の取得
-      const data = await page.evaluate(() => {
-        const bBadge = !!document.querySelector('.badge-link, .p13n-best-seller-badge');
-        const pElem = document.querySelector('.a-price-whole');
-        return {
-          hasBestSeller: bBadge,
-          price: pElem ? pElem.innerText.replace(/[^0-9]/g, '') : '取得失敗'
-        };
-      });
+          // 5. 異常検知ロジック
+          if (target.type === '自社' && data.bestsellerBadge === 'No') {
+            // スプレッドシート側の「前回の状態」と比較して通知するのが理想ですが、
+            // まずは「バッジがない＝アラート」として処理
+            alerts.push(`🚨【ベストセラー消失】${item.productName} (${target.asin})`);
+          }
 
-      // 異常判定 (例: 前回の価格やバッジ状態と比較)
-      if (!data.hasBestSeller && row.get('LastBestSeller') === 'TRUE') {
-        notifications.push(`⚠️ 【ベストセラー消失】${asin}`);
+          // 競合が安すぎる場合の例（必要に応じて）
+          if (target.type === '競合' && parseInt(data.price) < 1000 && data.price !== '0') {
+            alerts.push(`💰【安値警告】競合が1000円を切りました: ${target.asin}`);
+          }
+        }
+        // 連続アクセス対策
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
-      
-      // シートを更新
-      row.set('CurrentPrice', data.price);
-      row.set('LastBestSeller', data.hasBestSeller ? 'TRUE' : 'FALSE');
-      await row.save();
-      
-      await page.waitForTimeout(2000); // 連続アクセス対策
     }
 
-    await browser.close();
-
-    // 4. Chatwork通知
-    if (notifications.length > 0 && process.env.CHATWORK_API_TOKEN) {
-      const bodyText = `[info][title]Amazon 異常検知[/title]${notifications.join('\n')}[/info]`;
-      const params = new URLSearchParams();
-      params.append('body', bodyText);
-
-      await fetch(`https://api.chatwork.com/v2/rooms/${process.env.CHATWORK_ROOM_ID}/messages`, {
-        method: 'POST',
-        headers: {
-          'X-ChatWorkToken': process.env.CHATWORK_API_TOKEN,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: params
-      });
-      console.log('📩 Chatworkに通知しました');
+    // 6. 履歴の保存
+    if (allResults.length > 0) {
+      await gsm.recordBatchData('履歴', allResults);
     }
 
-    console.log('✅ すべての処理が完了しました');
+    // 7. Chatwork通知
+    if (alerts.length > 0) {
+      const message = `[info][title]Amazon Product Monitor アラート[/title]${alerts.join('\n')}[/info]`;
+      await notifier.sendMessage(message);
+    }
 
   } catch (error) {
-    console.error('❌ エラーが発生しました:', error);
-    process.exit(1);
+    console.error('❌ メインプロセスでエラー発生:', error);
+  } finally {
+    // 8. 後片付け
+    await scraper.close();
+    console.log('🏁 すべてのプロセスが終了しました');
   }
 }
 
-run();
+monitor();
