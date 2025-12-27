@@ -46,9 +46,16 @@ async function monitor() {
       ];
 
       for (const target of targets) {
+        console.log(`🔎 調査中: ${target.asin} (${target.type})`);
+        
+        // 商品情報を取得
         const data = await scraper.getProductInfo(target.asin);
 
         if (data) {
+          // --- デバッグログの出力 ---
+          // ここで「取得失敗」や「0」になっている原因を特定するための情報を出します
+          console.log(`[DEBUG] 取得結果 - タイトル: ${data.productName}, 価格: ${data.price}, バッジ: ${data.bestsellerBadge}`);
+          
           const result = {
             ...data,
             asin: target.asin,
@@ -61,7 +68,10 @@ async function monitor() {
           if (target.type === '自社' && data.bestsellerBadge === 'No') {
             alerts.push(`🚨【ベストセラー消失】${item.productName} (${target.asin})`);
           }
+        } else {
+          console.error(`[DEBUG] ${target.asin} のデータが null で返されました。`);
         }
+        
         // 連続アクセス対策
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
@@ -70,6 +80,8 @@ async function monitor() {
     // 6. 履歴の保存
     if (allResults.length > 0) {
       await gsm.recordBatchData('履歴', allResults);
+    } else {
+      console.log('⚠ 保存すべきデータがありませんでした。');
     }
 
     // 7. Chatwork通知
