@@ -1,33 +1,40 @@
 name: Amazon Product Monitor
 
 on:
-  schedule:
-    # 毎日9時・15時・21時（JST）
-    - cron: '0 0,6,12 * * *'
   workflow_dispatch:
+  schedule:
+    # 毎日 9:00 JST（UTC 0:00）
+    - cron: '0 0 * * *'
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
 
     steps:
-      - name: Checkout
+      # ① リポジトリ取得
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ② Node.js セットアップ
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
+          cache: 'npm'
 
+      # ③ 依存関係インストール
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
+      # ④ Playwright ブラウザインストール（※ここが重要）
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
 
+      # ⑤ Amazon Monitor 実行
       - name: Run Amazon Monitor
         env:
-          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
-          GOOGLE_SHEETS_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
         run: npm start
