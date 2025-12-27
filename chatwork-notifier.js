@@ -1,9 +1,6 @@
-const axios = require('axios');
+import axios from 'axios'; // require から変更
 
-/**
- * Chatwork通知クラス
- */
-class ChatworkNotifier {
+export default class ChatworkNotifier { // module.exports から変更
   constructor(apiToken, roomId) {
     this.apiToken = apiToken;
     this.roomId = roomId;
@@ -12,14 +9,16 @@ class ChatworkNotifier {
 
   /**
    * メッセージを送信
-   * @param {string} message - 送信するメッセージ
-   * @returns {Promise<boolean>} - 成功時true
    */
   async sendMessage(message) {
     try {
+      // URLSearchParams を使って x-www-form-urlencoded 形式にする
+      const params = new URLSearchParams();
+      params.append('body', message);
+
       const response = await axios.post(
         `${this.baseUrl}/rooms/${this.roomId}/messages`,
-        { body: message },
+        params, // ここに params を渡す
         {
           headers: {
             'X-ChatWorkToken': this.apiToken,
@@ -31,7 +30,9 @@ class ChatworkNotifier {
       console.log(`✓ Chatwork通知送信成功 (ID: ${response.data.message_id})`);
       return true;
     } catch (error) {
-      console.error('✗ Chatwork通知送信失敗:', error.response?.data || error.message);
+      // エラーハンドリングの強化
+      const errorDetail = error.response?.data?.errors || error.message;
+      console.error('✗ Chatwork通知送信失敗:', errorDetail);
       return false;
     }
   }
@@ -76,7 +77,6 @@ class ChatworkNotifier {
     for (const notification of notifications) {
       const result = await this.sendMessage(notification);
       results.push(result);
-      // API制限対策：100ms待機
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     return results;
@@ -89,10 +89,8 @@ class ChatworkNotifier {
     const message = `[info][title]✅ Amazon Product Monitor[/title]
 システムが正常に動作しています。
 
-タイムスタンプ: ${new Date().toISOString()}[/info]`;
+タイムスタンプ: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}[/info]`;
     
     return await this.sendMessage(message);
   }
 }
-
-module.exports = ChatworkNotifier;
