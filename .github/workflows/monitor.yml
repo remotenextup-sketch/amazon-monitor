@@ -1,43 +1,33 @@
-# .github/workflows/amazon-monitor.yml
-name: Amazon Monitor
+name: Amazon Monitor CI
 
 on:
-  schedule:
-    - cron: '0 9 * * *' # 毎日9時に実行
-  workflow_dispatch: # 手動実行も可能
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build-and-run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: リポジトリをチェックアウト
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Node.js をセットアップ
-        uses: actions/setup-node@v3
-        with:
-          node-version: '20'
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
 
-      - name: キャッシュ依存関係
-        uses: actions/cache@v3
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
+    - name: Install dependencies
+      run: npm install
 
-      - name: 依存関係インストール
-        run: npm ci
+    - name: Install Playwright browsers
+      run: npx playwright install
 
-      - name: Playwright ブラウザインストール
-        run: npx playwright install
+    - name: Set environment variables
+      run: |
+        echo "GOOGLE_SHEETS_ID=***" >> $GITHUB_ENV
+        echo "GOOGLE_SERVICE_ACCOUNT=***" >> $GITHUB_ENV
 
-      - name: 環境変数設定
-        run: |
-          echo "GOOGLE_SHEETS_ID=${{ secrets.GOOGLE_SHEETS_ID }}" >> $GITHUB_ENV
-          echo "CHATWORK_TOKEN=${{ secrets.CHATWORK_TOKEN }}" >> $GITHUB_ENV
-          echo "CHATWORK_ROOM_ID=${{ secrets.CHATWORK_ROOM_ID }}" >> $GITHUB_ENV
-
-      - name: Amazon Monitor 実行
-        run: node index.js
+    - name: Run Amazon Monitor
+      run: node index.js
