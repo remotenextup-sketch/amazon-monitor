@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 
 /**
- * Amazon商品スクレイパークラス
+ * Amazon商品スクレイパークラス（安全版）
  */
 class AmazonScraper {
   constructor() {
@@ -22,6 +22,7 @@ class AmazonScraper {
       return true;
     } catch (error) {
       console.error('✗ ブラウザ起動失敗:', error.message);
+      this.browser = null;
       return false;
     }
   }
@@ -40,10 +41,17 @@ class AmazonScraper {
    * 商品情報を取得
    */
   async getProductInfo(asin) {
-    const context = await this.browser.newContext({
-      userAgent: this.userAgent,
-      viewport: { width: 1280, height: 800 }
-    });
+    if (!this.browser) {
+      console.error(`✗ ブラウザ未初期化のため商品情報取得不可 (ASIN: ${asin})`);
+      return null;
+    }
+
+    // Playwright 1.18以上の場合は createContext、古い場合は newContext
+    const contextFn = typeof this.browser.newContext === 'function'
+      ? this.browser.newContext.bind(this.browser)
+      : this.browser.createContext.bind(this.browser);
+
+    const context = await contextFn({ userAgent: this.userAgent });
     const page = await context.newPage();
 
     try {
@@ -53,36 +61,39 @@ class AmazonScraper {
       await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
       await page.waitForTimeout(2000);
 
-      // 商品情報を抽出
       const productData = await page.evaluate(() => {
-        const getText = (selector) => {
-          const el = document.querySelector(selector);
-          return el?.textContent?.trim() || null;
-        };
+        const productNameElement = document.querySelector('h1 span');
+        const productName = productNameElement?.textContent?.trim() || 'N/A';
 
-        // 商品名
-        const productName = getText('#productTitle') || 'N/A';
+        const priceElement = document.querySelector('.a-price-whole');
+        const price = priceElement?.textContent?.replace(/[^0-9]/g, '') || 'N/A';
 
-        // 価格
-        const priceEl = document.querySelector('#priceblock_ourprice, #priceblock_dealprice, .a-price .a-offscreen');
-        const price = priceEl?.textContent.replace(/[^0-9]/g,'') || 'N/A';
+        const bestsellerElements = Array.from(document.querySelectorAll('*')).filter(el =>
+          el.textContent.includes('ベストセラー')
+        );
+        const bestsellerBadge = bestsellerElements.length > 0 ? 'Yes' : 'No';
 
-        // ベストセラーバッジ
-        const bestsellerBadge = Array.from(document.querySelectorAll('span')).some(el => el.textContent.includes('ベストセラー')) ? 'Yes' : 'No';
+        const reviewElement = document.querySelector('[data-hook="total-review-count"]');
+        const reviewCount = reviewElement?.textContent?.match(/\d+/)?.[0] || '0';
 
-        // レビュー数
-        const reviewCountEl = document.querySelector('#acrCustomerReviewText');
-        const reviewCount = reviewCountEl?.textContent.replace(/[^0-9]/g,'') || '0';
-
-        // ランキング情報
         let smallCategoryRank = 'N/A';
         let largeCategoryRank = 'N/A';
-        const rankingTextEl = document.querySelector('#detailBulletsWrapper_feature_div, #productDetails_detailBullets_sections1');
-        const rankingText = rankingTextEl?.textContent || '';
-        const rankMatches = rankingText.match(/#([\d,]+)\s+in\s+(.+?)(?:\n|#|$)/g);
-        if (rankMatches?.length) {
-          smallCategoryRank = rankMatches[0].match(/#([\d,]+)/)?.[1] || 'N/A';
-          if (rankMatches[1]) largeCategoryRank = rankMatches[1].match(/#([\d,]+)/)?.[1] || 'N/A';
+        const rankingTexts = [];
+
+        const rankElements = document.querySelectorAll('[data-feature-name="rank"]');
+        rankElements.forEach(el => rankingTexts.push(el.textContent));
+
+        const allElements = document.querySelectorAll('*');
+        allElements.forEach(el => {
+          if (el.textContent.includes('ランキング') && el.textContent.length < 200) {
+            rankingTexts.push(el.textContent);
+          }
+        });
+
+        const rankMatches = rankingTexts.join(' ').match(/#(\d+)/g);
+        if (rankMatches && rankMatches.length > 0) {
+          smallCategoryRank = rankMatches[0].replace('#', '');
+          if (rankMatches.length > 1) largeCategoryRank = rankMatches[1].replace('#', '');
         }
 
         return {
@@ -97,6 +108,7 @@ class AmazonScraper {
 
       console.log(`✓ 抽出成功: ${productData.productName}`);
       return productData;
+
     } catch (error) {
       console.error(`✗ 抽出失敗 (${asin}):`, error.message);
       return null;
@@ -110,14 +122,11 @@ class AmazonScraper {
    */
   async getMultipleProducts(asins) {
     const results = {};
-    
     for (const asin of asins) {
       const data = await this.getProductInfo(asin);
       if (data) results[asin] = data;
-      // リクエスト制限対策：2秒待機
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
-
     return results;
   }
 }
