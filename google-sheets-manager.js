@@ -31,22 +31,37 @@ class GoogleSheetsManager {
    * 複数のデータを一括記録
    * dataArray の各要素は [timestamp, 商品名, ASIN, Amazon商品名, 価格, ベストセラーバッジ, 小カテランキング, 大カテランキング, レビュー数, ステータス, 危険度スコア]
    */
-  async recordBatchData(sheetName, dataArray) {
-    try {
-      const response = await this.sheetsClient.spreadsheets.values.append({
-        spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:K`, // 列をA→Kに拡張
-        valueInputOption: 'RAW',
-        resource: { values: dataArray }
-      });
+async recordBatchData(sheetName, dataArray) {
+  try {
+    const values = dataArray.map(d => [
+      new Date().toISOString(),       // タイムスタンプ
+      d.productName,                  // 商品名
+      d.asin,                         // ASIN
+      d.amazonProductName,            // Amazon商品名
+      d.price,                        // 価格
+      d.bestsellerBadge,              // ベストセラーバッジ
+      d.smallCategoryRank,            // 小カテランキング
+      d.largeCategoryRank,            // 大カテランキング
+      d.reviewCount,                  // レビュー数
+      d.status || '正常',             // ステータス
+      d.score || 0,                   // スコア
+      d.type || '自社'                // タイプ
+    ]);
 
-      console.log(`✓ ${dataArray.length}件のデータを記録成功`);
-      return true;
-    } catch (error) {
-      console.error('✗ 一括記録失敗:', error.message);
-      return false;
-    }
+    await this.sheetsClient.spreadsheets.values.append({
+      spreadsheetId: this.spreadsheetId,
+      range: `${sheetName}!A:L`,
+      valueInputOption: 'RAW',
+      resource: { values }
+    });
+
+    console.log(`✓ ${dataArray.length}件のデータを履歴に記録成功`);
+    return true;
+  } catch (error) {
+    console.error('✗ 一括記録失敗:', error.message);
+    return false;
   }
+}
 
   async getLastRecord(sheetName, asin) {
     try {
