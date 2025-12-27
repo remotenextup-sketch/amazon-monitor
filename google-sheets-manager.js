@@ -10,9 +10,6 @@ class GoogleSheetsManager {
     this.spreadsheetId = null;
   }
 
-  /**
-   * 初期化
-   */
   async initialize(spreadsheetId) {
     try {
       const auth = new google.auth.GoogleAuth({
@@ -31,41 +28,36 @@ class GoogleSheetsManager {
   }
 
   /**
-   * データを記録
+   * 複数のデータを一括記録
+   * dataArray の各要素は [timestamp, 商品名, ASIN, Amazon商品名, 価格, ベストセラーバッジ, 小カテランキング, 大カテランキング, レビュー数, ステータス, 危険度スコア]
    */
-  async recordData(sheetName, data) {
+  async recordBatchData(sheetName, dataArray) {
     try {
-      const values = [data];
-      
       const response = await this.sheetsClient.spreadsheets.values.append({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:I`,
+        range: `${sheetName}!A:K`, // 列をA→Kに拡張
         valueInputOption: 'RAW',
-        resource: { values }
+        resource: { values: dataArray }
       });
 
-      console.log(`✓ Google Sheetsに記録成功 (${sheetName})`);
+      console.log(`✓ ${dataArray.length}件のデータを記録成功`);
       return true;
     } catch (error) {
-      console.error('✗ Google Sheetsへの記録失敗:', error.message);
+      console.error('✗ 一括記録失敗:', error.message);
       return false;
     }
   }
 
-  /**
-   * 最後のデータを取得
-   */
   async getLastRecord(sheetName, asin) {
     try {
       const response = await this.sheetsClient.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:I`
+        range: `${sheetName}!A:K`
       });
 
       const rows = response.data.values || [];
       if (rows.length === 0) return null;
 
-      // ASINで最後のレコードを検索
       for (let i = rows.length - 1; i >= 1; i--) {
         if (rows[i][2] === asin) {
           return {
@@ -77,11 +69,12 @@ class GoogleSheetsManager {
             bestsellerBadge: rows[i][5],
             smallCategoryRank: rows[i][6],
             largeCategoryRank: rows[i][7],
-            reviewCount: rows[i][8]
+            reviewCount: rows[i][8],
+            status: rows[i][9] || 'OK',
+            dangerScore: rows[i][10] || 0
           };
         }
       }
-
       return null;
     } catch (error) {
       console.error('✗ データ取得失敗:', error.message);
@@ -89,9 +82,6 @@ class GoogleSheetsManager {
     }
   }
 
-  /**
-   * 設定シートから商品情報を取得
-   */
   async getProductConfig() {
     try {
       const response = await this.sheetsClient.spreadsheets.values.get({
@@ -123,26 +113,6 @@ class GoogleSheetsManager {
     } catch (error) {
       console.error('✗ 設定取得失敗:', error.message);
       return {};
-    }
-  }
-
-  /**
-   * 複数のデータを一括記録
-   */
-  async recordBatchData(sheetName, dataArray) {
-    try {
-      const response = await this.sheetsClient.spreadsheets.values.append({
-        spreadsheetId: this.spreadsheetId,
-        range: `${sheetName}!A:I`,
-        valueInputOption: 'RAW',
-        resource: { values: dataArray }
-      });
-
-      console.log(`✓ ${dataArray.length}件のデータを記録成功`);
-      return true;
-    } catch (error) {
-      console.error('✗ 一括記録失敗:', error.message);
-      return false;
     }
   }
 }
