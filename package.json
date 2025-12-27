@@ -1,19 +1,18 @@
 {
   "name": "amazon-monitor",
   "version": "1.0.0",
-  "description": "Amazon product monitoring with Playwright, Google Sheets, and Chatwork notifications",
+  "description": "Amazon Product Monitor with Google Sheets",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node index.js"
   },
-  "keywords": ["amazon", "playwright", "google-sheets", "chatwork"],
-  "author": "",
+  "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "playwright": "^1.40.0",
-    "google-auth-library": "^9.4.1",
-    "googleapis": "^118.0.0",
-    "axios": "^1.6.2"
+    "google-spreadsheet": "^3.3.0",
+    "playwright": "^1.44.0",
+    "node-fetch": "^3.3.1",
+    "dotenv": "^16.3.1"
   }
 }
