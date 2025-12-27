@@ -1,157 +1,97 @@
 // index.js
-const AmazonScraper = require('./amazon-scraper');
-const GoogleSheetsManager = require('./google-sheets-manager');
-const ChatworkNotifier = require('./chatwork-notifier');
+import { google } from 'googleapis';
+import dotenv from 'dotenv';
+import AmazonScraper from './amazon-scraper.js';
 
-// 環境変数
-const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
-const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-const CHATWORK_API_TOKEN = process.env.CHATWORK_API_TOKEN;
-const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID;
+dotenv.config();
 
-async function main() {
-  console.log('\n========================================');
-  console.log('🚀 Amazon Product Monitor 開始');
-  console.log(`⏰ ${new Date().toISOString()}`);
-  console.log('========================================\n');
+const SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
 
-  if (!GOOGLE_SHEETS_ID || !GOOGLE_SERVICE_ACCOUNT_KEY || !CHATWORK_API_TOKEN || !CHATWORK_ROOM_ID) {
-    console.error('❌ 環境変数が不足しています');
+(async () => {
+  console.log('🚀 Amazon Product Monitor 開始', new Date().toISOString());
+
+  // Google Sheets 初期化
+  let sheets;
+  try {
+    const credentials = JSON.parse(
+      process.env.GOOGLE_SERVICE_ACCOUNT_KEY.replace(/\\n/g, '\n')
+    );
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    sheets = google.sheets({ version: 'v4', auth });
+    console.log('✓ Google Sheets接続成功');
+  } catch (err) {
+    console.error('❌ Google Sheets接続エラー:', err);
     process.exit(1);
   }
 
-  let scraper = null;
-  let sheetsManager = null;
-  let notifier = null;
+  // 設定シート読み込み
+  const getSettings = async () => {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEETS_ID,
+      range: '設定!A2:F',
+    });
+    return (res.data.values || []).map(row => ({
+      name: row[0],
+      selfASIN: row[1],
+      competitorASINs: [row[2], row[3]].filter(Boolean),
+      active: row[4] === 'TRUE',
+      type: row[5] || '自社',
+    }));
+  };
+
+  // 履歴追記
+  const appendHistory = async (data) => {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEETS_ID,
+      range: '履歴!A1',
+      valueInputOption: 'RAW',
+      requestBody: { values: data },
+    });
+  };
+
+  // Amazon Scraper 初期化
+  const scraper = new AmazonScraper();
 
   try {
-    // 初期化
-    console.log('📝 初期化中...\n');
+    const settings = await getSettings();
 
-    const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY);
-    sheetsManager = new GoogleSheetsManager(credentials);
-    await sheetsManager.initialize(GOOGLE_SHEETS_ID);
+    const allResults = [];
 
-    notifier = new ChatworkNotifier(CHATWORK_API_TOKEN, CHATWORK_ROOM_ID);
+    for (const s of settings) {
+      if (!s.active) continue;
 
-    scraper = new AmazonScraper();
-    const browserOk = await scraper.initialize();
-    if (!browserOk) {
-      console.error('✗ ブラウザ起動失敗。処理を中断します');
-      return;
-    }
+      const asins = [s.selfASIN, ...s.competitorASINs];
 
-    console.log('\n📋 設定を読み込み中...');
-    const productConfig = await sheetsManager.getProductConfig();
-    if (Object.keys(productConfig).length === 0) {
-      console.warn('⚠️ 監視対象の商品がありません');
-      return;
-    }
-    console.log(`✓ ${Object.keys(productConfig).length}商品を検出\n`);
+      for (const asin of asins) {
+        const type = asin === s.selfASIN ? '自社' : '競合';
+        const info = await scraper.getProductInfo(asin);
 
-    // ASINリスト作成
-    const allAsins = [];
-    const asinToProduct = {};
-    for (const [productName, config] of Object.entries(productConfig)) {
-      if (config.active !== 'TRUE') continue; // Active チェック
+        const row = [
+          new Date().toISOString(),
+          s.name,
+          asin,
+          info.title || '',
+          info.price || '',
+          info.bestsellerBadge || '',
+          info.smallRank || '',
+          info.largeRank || '',
+          info.reviewCount || '',
+          info.status || '',
+          info.score || '',
+          type
+        ];
 
-      allAsins.push(config.ownAsin);
-      asinToProduct[config.ownAsin] = { name: productName, type: '自社' };
-
-      for (const competitorAsin of config.competitors) {
-        if (!competitorAsin) continue;
-        allAsins.push(competitorAsin);
-        asinToProduct[competitorAsin] = { name: productName, type: '競合' };
+        allResults.push(row);
       }
     }
 
-    // 商品情報取得
-    console.log('🔍 Amazon から商品情報を取得中...\n');
-    const allProductData = await scraper.getMultipleProducts(allAsins);
+    if (allResults.length > 0) await appendHistory(allResults);
 
-    // Google Sheetsに記録
-    console.log('\n💾 Google Sheets に記録中...\n');
-    const recordsToAdd = [];
-    for (const asin of allAsins) {
-      if (!allProductData[asin]) continue;
-      const productInfo = asinToProduct[asin];
-      const data = allProductData[asin];
-
-      const record = [
-        new Date().toISOString(),
-        productInfo.name,
-        asin,
-        data.productName,
-        data.price,
-        data.bestsellerBadge,
-        data.smallCategoryRank,
-        data.largeCategoryRank,
-        data.reviewCount,
-        '', // ステータス空欄
-        '', // スコア空欄
-        productInfo.type
-      ];
-      recordsToAdd.push(record);
-    }
-
-    if (recordsToAdd.length > 0) {
-      await sheetsManager.recordBatchData('履歴', recordsToAdd);
-    }
-
-    // 通知チェック
-    console.log('\n🔔 通知条件をチェック中...\n');
-    for (const [productName, config] of Object.entries(productConfig)) {
-      if (config.active !== 'TRUE') continue;
-
-      const ownAsin = config.ownAsin;
-      const currentData = allProductData[ownAsin];
-      if (!currentData) continue;
-
-      const previousData = await sheetsManager.getLastRecord('履歴', ownAsin);
-
-      // ベストセラーバッジ喪失
-      if (previousData && previousData.bestsellerBadge === 'Yes' && currentData.bestsellerBadge === 'No') {
-        await notifier.notifyBestsellerLost(
-          productName,
-          currentData.smallCategoryRank,
-          previousData.smallCategoryRank
-        );
-      }
-
-      // 競合接近チェック
-      for (const competitorAsin of config.competitors) {
-        if (!competitorAsin) continue;
-        const competitorData = allProductData[competitorAsin];
-        if (!competitorData) continue;
-
-        const ourRank = parseInt(currentData.smallCategoryRank);
-        const competitorRank = parseInt(competitorData.smallCategoryRank);
-
-        if (!isNaN(ourRank) && !isNaN(competitorRank)) {
-          const rankDiff = Math.abs(ourRank - competitorRank);
-          if (rankDiff <= 20) {
-            await notifier.notifyCompetitorApproaching(
-              productName,
-              ourRank,
-              competitorRank,
-              competitorData.productName,
-              rankDiff
-            );
-          }
-        }
-      }
-    }
-
-    console.log('\n✅ 処理完了\n');
-
-  } catch (error) {
-    console.error('❌ エラーが発生しました:', error);
-  } finally {
-    if (scraper) await scraper.close();
+    console.log(`✅ ${allResults.length} 件のデータを履歴シートに追記`);
+  } catch (err) {
+    console.error('❌ 処理エラー:', err);
   }
-}
-
-main().catch(error => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+})();
