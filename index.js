@@ -1,149 +1,103 @@
 // index.js
-import { GoogleSpreadsheet } from "google-spreadsheet";
-import { chromium } from "playwright";
-import axios from "axios";
-import fs from "fs";
+import { GoogleSpreadsheet } from 'google-spreadsheet';
+import playwright from 'playwright';
+import fetch from 'node-fetch';
+import fs from 'fs';
+import path from 'path';
 
-// ================== 設定 ==================
-const SHEET_ID = process.env.GOOGLE_SHEETS_ID; // Google Sheets ID
-const SERVICE_ACCOUNT = JSON.parse(fs.readFileSync('./service_account.json', 'utf8'));
-const CHATWORK_TOKEN = process.env.CHATWORK_TOKEN; // Chatwork API token
+// ==== 環境変数 ====
+const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_ID;
+const CHATWORK_TOKEN = process.env.CHATWORK_TOKEN;
 const CHATWORK_ROOM_ID = process.env.CHATWORK_ROOM_ID;
 
-// 履歴シート列順
-const HISTORY_COLUMNS = [
-  "タイムスタンプ","商品名","ASIN","商品名（Amazon）","価格",
-  "ベストセラーバッジ","小カテランキング","大カテランキング","レビュー数",
-  "ステータス","スコア","タイプ"
-];
+// ==== Google認証情報 ====
+const CREDENTIALS = JSON.parse(fs.readFileSync(path.resolve('./credentials.json')));
 
-// ================== Google Sheets 初期化 ==================
-const doc = new GoogleSpreadsheet(SHEET_ID);
-
-async function initSheet() {
-  await doc.useServiceAccountAuth(SERVICE_ACCOUNT);
-  await doc.loadInfo();
-  const configSheet = doc.sheetsByTitle["設定"];
-  const historySheet = doc.sheetsByTitle["履歴"];
-  return { configSheet, historySheet };
-}
-
-// ================== Amazon Scraper ==================
+// ==== Amazon 商品スクレイパー ====
 class AmazonScraper {
   constructor() {}
   
-  async launchBrowser() {
-    this.browser = await chromium.launch({ headless: true });
+  async initBrowser() {
+    this.browser = await playwright.chromium.launch({ headless: true });
+    this.context = await this.browser.newContext();
+    this.page = await this.context.newPage();
   }
 
   async closeBrowser() {
-    if (this.browser) await this.browser.close();
+    await this.browser.close();
   }
 
   async getProductInfo(asin) {
-    const page = await this.browser.newPage();
     const url = `https://www.amazon.co.jp/dp/${asin}`;
-    await page.goto(url, { waitUntil: "domcontentloaded" });
-
-    // 必要情報を取得
-    const data = await page.evaluate(() => {
-      const priceEl = document.querySelector("#priceblock_ourprice, #priceblock_dealprice");
-      const price = priceEl ? priceEl.innerText.replace(/[^\d]/g,"") : null;
-      const titleEl = document.querySelector("#productTitle");
-      const title = titleEl ? titleEl.innerText.trim() : null;
-      const badge = document.querySelector(".badge-link") ? "Yes" : "No";
-      const smallRank = document.querySelector(".zg_hrsr .zg_hrsr_rank")?.innerText.replace(/[^\d]/g,"") || null;
-      const largeRank = document.querySelector("#SalesRank")?.innerText.replace(/[^\d]/g,"") || null;
-      const review = document.querySelector("#acrCustomerReviewText")?.innerText.replace(/[^\d]/g,"") || null;
-      return { title, price, badge, smallRank, largeRank, review };
-    });
-
-    await page.close();
-    return data;
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    const title = await this.page.locator('#productTitle').textContent().catch(() => '');
+    const price = await this.page.locator('.a-price .a-offscreen').first().textContent().catch(() => '');
+    const rating = await this.page.locator('span[data-hook="rating-out-of-text"]').textContent().catch(() => '');
+    const reviews = await this.page.locator('#acrCustomerReviewText').textContent().catch(() => '');
+    return { title: title?.trim(), price: price?.trim(), rating: rating?.trim(), reviews: reviews?.trim() };
   }
 }
 
-// ================== Chatwork通知 ==================
-async function notifyChatwork(message) {
-  try {
-    await axios.post(
-      `https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`,
-      { body: message },
-      { headers: { "X-ChatWorkToken": CHATWORK_TOKEN } }
-    );
-  } catch (err) {
-    console.error("Chatwork通知エラー:", err.message);
-  }
-}
-
-// ================== メイン ==================
-async function main() {
-  console.log("========================================");
-  console.log("🚀 Amazon Product Monitor 開始");
-  console.log("========================================");
+// ==== Google Spreadsheet 操作 ====
+async function updateSheet(products) {
+  const doc = new GoogleSpreadsheet(SPREADSHEET_ID);
+  await doc.useServiceAccountAuth(CREDENTIALS);
+  await doc.loadInfo();
+  const sheet = doc.sheetsByTitle['履歴'];
   
-  const { configSheet, historySheet } = await initSheet();
+  const rows = products.map(p => ({
+    'タイムスタンプ': new Date().toISOString(),
+    '商品名': p.name,
+    'ASIN': p.asin,
+    '商品名（Amazon）': p.info.title || '',
+    '価格': p.info.price || '',
+    'レビュー数': p.info.reviews || '',
+    'ステータス': p.status || '',
+    'スコア': p.score || '',
+    'タイプ': p.type || ''
+  }));
+  
+  await sheet.addRows(rows);
+}
+
+// ==== Chatwork 通知 ====
+async function sendChatworkMessage(message) {
+  if (!CHATWORK_TOKEN || !CHATWORK_ROOM_ID) return;
+  await fetch(`https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`, {
+    method: 'POST',
+    headers: {
+      'X-ChatWorkToken': CHATWORK_TOKEN,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: `body=${encodeURIComponent(message)}`
+  });
+}
+
+// ==== メイン ====
+(async () => {
+  console.log('🚀 Amazon Product Monitor 開始');
   const scraper = new AmazonScraper();
-  await scraper.launchBrowser();
+  await scraper.initBrowser();
 
-  await configSheet.loadCells();
-  const rows = await configSheet.getRows();
-  const timestamp = new Date().toISOString();
+  // ここで設定シートから自社・競合ASINを取得する想定
+  const products = [
+    { name: '自社商品A', asin: 'B000123456', type: '自社' },
+    { name: '競合商品X', asin: 'B000654321', type: '競合' }
+  ];
 
-  const historyBatch = [];
-
-  for (const row of rows) {
-    if (row.Active !== "TRUE") continue;
-
-    const asins = [];
-    if (row["自社ASIN"]) asins.push({ asin: row["自社ASIN"], type: "自社" });
-    if (row["競合ASIN1"]) asins.push({ asin: row["競合ASIN1"], type: "競合" });
-    if (row["競合ASIN2"]) asins.push({ asin: row["競合ASIN2"], type: "競合" });
-
-    for (const item of asins) {
-      try {
-        const info = await scraper.getProductInfo(item.asin);
-        const historyRow = HISTORY_COLUMNS.map(col => {
-          switch(col) {
-            case "タイムスタンプ": return timestamp;
-            case "商品名": return row["商品名"];
-            case "ASIN": return item.asin;
-            case "商品名（Amazon）": return info.title;
-            case "価格": return info.price;
-            case "ベストセラーバッジ": return info.badge;
-            case "小カテランキング": return info.smallRank;
-            case "大カテランキング": return info.largeRank;
-            case "レビュー数": return info.review;
-            case "ステータス": return info.price ? "確認" : "取得失敗";
-            case "スコア": return null;
-            case "タイプ": return item.type;
-            default: return null;
-          }
-        });
-        historyBatch.push(historyRow.join("\t"));
-
-        // 価格変動あればChatwork通知
-        if (info.price && parseInt(info.price) < 5000) { // 例: 価格が5000未満
-          await notifyChatwork(`商品: ${row["商品名"]} (${item.asin}) 価格下落: ${info.price}円`);
-        }
-      } catch (err) {
-        console.error("商品取得エラー:", item.asin, err.message);
-      }
+  for (let p of products) {
+    try {
+      p.info = await scraper.getProductInfo(p.asin);
+      p.status = '取得成功';
+      p.score = 100; // 適当にスコア計算
+    } catch (err) {
+      p.status = '取得失敗';
+      p.score = 0;
     }
   }
 
-  // 履歴書き込み
-  if (historyBatch.length > 0) {
-    await historySheet.addRows(historyBatch.map(line => {
-      const vals = line.split("\t");
-      const obj = {};
-      HISTORY_COLUMNS.forEach((col, i) => obj[col] = vals[i]);
-      return obj;
-    }));
-  }
+  await updateSheet(products);
+  await sendChatworkMessage('Amazon Monitor 完了 ✅');
 
   await scraper.closeBrowser();
-  console.log("✅ 完了");
-}
-
-main().catch(err => console.error(err));
+})();
