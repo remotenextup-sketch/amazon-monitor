@@ -41,7 +41,8 @@ class AmazonScraper {
    */
   async getProductInfo(asin) {
     const context = await this.browser.newContext({
-      userAgent: this.userAgent
+      userAgent: this.userAgent,
+      viewport: { width: 1280, height: 800 }
     });
     const page = await context.newPage();
 
@@ -54,50 +55,34 @@ class AmazonScraper {
 
       // 商品情報を抽出
       const productData = await page.evaluate(() => {
+        const getText = (selector) => {
+          const el = document.querySelector(selector);
+          return el?.textContent?.trim() || null;
+        };
+
         // 商品名
-        const productNameElement = document.querySelector('h1 span');
-        const productName = productNameElement?.textContent?.trim() || 'N/A';
+        const productName = getText('#productTitle') || 'N/A';
 
         // 価格
-        const priceElement = document.querySelector('.a-price-whole');
-        const price = priceElement?.textContent?.replace(/[^0-9]/g, '') || 'N/A';
+        const priceEl = document.querySelector('#priceblock_ourprice, #priceblock_dealprice, .a-price .a-offscreen');
+        const price = priceEl?.textContent.replace(/[^0-9]/g,'') || 'N/A';
 
         // ベストセラーバッジ
-        const bestsellerElements = Array.from(document.querySelectorAll('*')).filter(el =>
-          el.textContent.includes('ベストセラー')
-        );
-        const bestsellerBadge = bestsellerElements.length > 0 ? 'Yes' : 'No';
+        const bestsellerBadge = Array.from(document.querySelectorAll('span')).some(el => el.textContent.includes('ベストセラー')) ? 'Yes' : 'No';
 
         // レビュー数
-        const reviewElement = document.querySelector('[data-hook="total-review-count"]');
-        const reviewCount = reviewElement?.textContent?.match(/\d+/)?.[0] || '0';
+        const reviewCountEl = document.querySelector('#acrCustomerReviewText');
+        const reviewCount = reviewCountEl?.textContent.replace(/[^0-9]/g,'') || '0';
 
         // ランキング情報
         let smallCategoryRank = 'N/A';
         let largeCategoryRank = 'N/A';
-
-        // ランキング情報は複数の場所にある可能性があるため、複数の方法で検索
-        const rankingTexts = [];
-        
-        // 方法1: data-feature-name="rank"
-        const rankElements = document.querySelectorAll('[data-feature-name="rank"]');
-        rankElements.forEach(el => rankingTexts.push(el.textContent));
-
-        // 方法2: テキストで「ランキング」を含む要素
-        const allElements = document.querySelectorAll('*');
-        allElements.forEach(el => {
-          if (el.textContent.includes('ランキング') && el.textContent.length < 200) {
-            rankingTexts.push(el.textContent);
-          }
-        });
-
-        // ランキング情報を解析
-        const rankMatches = rankingTexts.join(' ').match(/#(\d+)/g);
-        if (rankMatches && rankMatches.length > 0) {
-          smallCategoryRank = rankMatches[0].replace('#', '');
-          if (rankMatches.length > 1) {
-            largeCategoryRank = rankMatches[1].replace('#', '');
-          }
+        const rankingTextEl = document.querySelector('#detailBulletsWrapper_feature_div, #productDetails_detailBullets_sections1');
+        const rankingText = rankingTextEl?.textContent || '';
+        const rankMatches = rankingText.match(/#([\d,]+)\s+in\s+(.+?)(?:\n|#|$)/g);
+        if (rankMatches?.length) {
+          smallCategoryRank = rankMatches[0].match(/#([\d,]+)/)?.[1] || 'N/A';
+          if (rankMatches[1]) largeCategoryRank = rankMatches[1].match(/#([\d,]+)/)?.[1] || 'N/A';
         }
 
         return {
@@ -128,9 +113,7 @@ class AmazonScraper {
     
     for (const asin of asins) {
       const data = await this.getProductInfo(asin);
-      if (data) {
-        results[asin] = data;
-      }
+      if (data) results[asin] = data;
       // リクエスト制限対策：2秒待機
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
