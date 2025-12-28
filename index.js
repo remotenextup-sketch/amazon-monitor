@@ -1,101 +1,73 @@
-import 'dotenv/config';
-import GoogleSheetsManager from './google-sheets-manager.js';
+import GoogleSheets from './google-sheets.js';
 import AmazonScraper from './amazon-scraper.js';
-import ChatworkNotifier from './chatwork-notifier.js';
+import { sendChatworkNotification } from './chatwork.js';
+import 'dotenv/config';
 
-async function monitor() {
+async function main() {
   console.log('🚀 Amazon Monitor 起動');
-
-  let gsm;
-  try {
-    // SecretsからJSONをパース
-    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-    
-    gsm = new GoogleSheetsManager({
-      client_email: serviceAccount.client_email,
-      private_key: serviceAccount.private_key,
-    });
-  } catch (err) {
-    console.error('❌ Google Service Account Key のパースに失敗しました。JSON形式が正しいか確認してください。');
-    return;
-  }
-
+  
+  const sheets = new GoogleSheets();
   const scraper = new AmazonScraper();
-  const notifier = new ChatworkNotifier(
-    process.env.CHATWORK_API_TOKEN,
-    process.env.CHATWORK_ROOM_ID
-  );
 
   try {
-    // 2. 準備（スプレッドシート接続 ＆ ブラウザ起動）
-    if (!(await gsm.initialize(process.env.GOOGLE_SHEETS_ID))) return;
+    // 1. スプレッドシートから設定読み込み
+    await sheets.initialize();
+    const rows = await sheets.getConfigRows(); // Active列が「有効」な行を取得する想定
+    console.log('✓ Google Sheets 接続成功');
+
+    // 2. ブラウザ起動
     if (!(await scraper.initialize())) return;
 
-    // 3. 設定シートから監視対象を取得
-    const productsConfig = await gsm.getProductConfig();
-    let allResults = [];
-    let alerts = [];
+    const allResults = [];
 
-    // 4. メインループ
-    for (const item of productsConfig) {
-      console.log(`--- 監視対象: ${item.productName} ---`);
+    for (const row of rows) {
+      if (row['Active'] !== '有効') continue;
 
-      const targets = [
-        { asin: item.ownAsin, type: '自社' },
-        ...item.competitors.map(asin => ({ asin, type: '競合' }))
+      const keyword = row['商品名'];
+      const targetAsins = [
+        { type: '自社', id: row['自社ASIN'] },
+        { type: '競合1', id: row['競合ASIN1'] },
+        { type: '競合2', id: row['競合ASIN2'] }
       ];
 
-      for (const target of targets) {
-        console.log(`🔎 調査中: ${target.asin} (${target.type})`);
-        
-        // 商品情報を取得
-        const data = await scraper.getProductInfo(target.asin);
+      // 💡 キーワードから検索URLを生成
+      const searchUrl = `https://www.amazon.co.jp/s?k=${encodeURIComponent(keyword)}`;
+      console.log(`--- 監視キーワード: ${keyword} ---`);
+
+      for (const target of targetAsins) {
+        if (!target.id) continue;
+
+        console.log(`🔎 調査中: ${target.type} (${target.id})`);
+        const data = await scraper.getProductInfo(target.id, searchUrl);
 
         if (data) {
-          // --- デバッグログの出力 ---
-          // ここで「取得失敗」や「0」になっている原因を特定するための情報を出します
-          console.log(`[DEBUG] 取得結果 - タイトル: ${data.productName}, 価格: ${data.price}, バッジ: ${data.bestsellerBadge}`);
-          
-          const result = {
-            ...data,
-            asin: target.asin,
-            productName: item.productName,
-            type: target.type
-          };
-          allResults.push(result);
-
-          // 5. 異常検知ロジック
-          if (target.type === '自社' && data.bestsellerBadge === 'No') {
-            alerts.push(`🚨【ベストセラー消失】${item.productName} (${target.asin})`);
-          }
-        } else {
-          console.error(`[DEBUG] ${target.asin} のデータが null で返されました。`);
+          allResults.push({
+            date: new Date().toLocaleString('ja-JP'),
+            keyword: keyword,
+            type: target.type,
+            asin: target.id,
+            ...data
+          });
         }
-        
-        // 連続アクセス対策
-        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
 
-    // 6. 履歴の保存
+    // 3. スプレッドシートの「履歴」シートに保存
     if (allResults.length > 0) {
-      await gsm.recordBatchData('履歴', allResults);
-    } else {
-      console.log('⚠ 保存すべきデータがありませんでした。');
-    }
+      await sheets.appendHistory(allResults);
+      console.log(`✓ ${allResults.length}件のデータを記録しました`);
 
-    // 7. Chatwork通知
-    if (alerts.length > 0) {
-      const message = `[info][title]Amazon Product Monitor アラート[/title]${alerts.join('\n')}[/info]`;
-      await notifier.sendMessage(message);
+      // 4. Chatwork通知 (任意でカスタマイズ)
+      const summary = allResults.map(r => `${r.keyword}(${r.type}): ￥${r.price} バッジ:${r.bestsellerBadge}`).join('\n');
+      await sendChatworkNotification(`【Amazon調査完了】\n${summary}`);
     }
 
   } catch (error) {
-    console.error('❌ メインプロセスでエラー発生:', error);
+    console.error('メインプロセスでエラー発生:', error);
   } finally {
     await scraper.close();
     console.log('🏁 すべてのプロセスが終了しました');
   }
 }
 
-monitor();
+main();
