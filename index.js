@@ -49,8 +49,16 @@ async function main() {
 
       for (const target of targetAsins) {
         const data = resultsMap[target.id] || { productName: '検索結果に不在', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
+        
+        // 日本時間に変換してフォーマット
+        const nowJst = new Intl.DateTimeFormat('ja-JP', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          timeZone: 'Asia/Tokyo'
+        }).format(new Date());
+
         allResults.push({
-          date: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+          date: nowJst,
           keyword: keyword,
           type: target.type,
           asin: target.id,
@@ -64,7 +72,15 @@ async function main() {
       console.log('📝 スプレッドシートへ書き込み中...');
       await sheets.appendHistory(allResults);
       console.log('✓ 書き込み完了');
-      await sendChatworkNotification(`【Amazon監視】${allResults.length}件の調査を完了しました。`);
+      
+      const summary = allResults
+        .filter(r => r.price !== '0')
+        .map(r => `${r.keyword}(${r.type}): ￥${r.price}${r.bestsellerBadge === 'Yes' ? '👑' : ''}`)
+        .join('\n');
+
+      if (summary) {
+        await sendChatworkNotification(`【Amazon調査完了】\n${summary}`);
+      }
     }
 
   } catch (error) {
