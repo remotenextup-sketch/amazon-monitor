@@ -15,11 +15,13 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # Secretsの名前に完全一致させています
+      # Secretsと環境変数を紐付け
       GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
       GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
       CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
       CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+      # CI環境（GitHub Actions）であることをPlaywrightに伝える
+      CI: true
       TZ: 'Asia/Tokyo'
 
     steps:
@@ -30,6 +32,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          # npmのキャッシュを有効化して実行速度を向上
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm install
@@ -38,4 +42,5 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run Amazon Monitor
+        # エラー発生時にログが途切れないようにする
         run: node index.js
