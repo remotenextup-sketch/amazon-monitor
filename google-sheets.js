@@ -26,6 +26,8 @@ export default class GoogleSheets {
 
   async appendHistory(results) {
     const sheet = this.doc.sheetsByTitle['履歴'];
+    
+    // スプシの履歴シートのヘッダー順序に厳密に合わせてマッピング
     const rows = results.map(res => ({
       'タイムスタンプ': res.date,
       '商品名': res.keyword,
@@ -33,9 +35,14 @@ export default class GoogleSheets {
       '商品名（Amazon）': res.productName,
       '価格': res.price,
       'ベストセラーバッジ': res.bestsellerBadge,
+      '小カテランキング': '', 
+      '大カテランキング': '', 
       'レビュー数': res.reviewCount,
+      'ステータス': res.price === '0' ? '要確認' : '正常',
+      'スコア': '',
       'タイプ': res.type
     }));
+
     await sheet.addRows(rows);
   }
 }
