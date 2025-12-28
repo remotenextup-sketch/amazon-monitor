@@ -22,31 +22,43 @@ export default class AmazonScraper {
     const url = `https://www.amazon.co.jp/dp/${asin}`;
 
     try {
-      console.log(`📡 商品ページ解析中: ${asin}`);
       await page.goto(url, { waitUntil: 'load', timeout: 60000 });
       await page.waitForTimeout(2000);
 
       const data = await page.evaluate(() => {
         const getT = (s) => document.querySelector(s)?.innerText.trim() || '';
         
-        // 価格
+        // 1. 価格・レビュー
         const price = getT('.a-price-whole').replace(/[^0-9]/g, '') || '0';
-        // レビュー数
-        const reviews = getT('#acrCustomerReviewText').replace(/[^0-9]/g, '') || '0';
-        // ベストセラー
-        const isBestseller = !!document.querySelector('.badge-link') || document.body.innerText.includes('ベストセラー');
-        // ランキング（大・小をテキストから抽出）
-        const rankText = document.querySelector('#detailBullets_feature_div')?.innerText || document.querySelector('#productDetails_db_sections')?.innerText || '';
+        const reviewCount = getT('#acrCustomerReviewText').replace(/[^0-9]/g, '') || '0';
+        
+        // 2. ベストセラー
+        const isBS = !!document.querySelector('.badge-link') || document.body.innerText.includes('ベストセラー');
+
+        // 3. ランキング抽出 (大・小カテゴリ)
+        const bodyText = document.body.innerText;
+        const rankMatch = bodyText.match(/Amazon 売れ筋ランキング:?\s*([^\n]+)/);
+        let bigRank = '', smallRank = '';
+        
+        if (rankMatch) {
+          const lines = bodyText.split('\n');
+          const rankLine = lines.find(l => l.includes(' - ') && l.includes('位'));
+          if (rankLine) {
+            const parts = rankLine.split(' - ');
+            bigRank = parts[0].replace(/[^0-9]/g, '') + '位';
+            smallRank = (parts[1] || '').replace(/[^0-9]/g, '') + '位';
+          }
+        }
 
         return {
           productName: getT('#productTitle'),
           price: price,
-          bestsellerBadge: isBestseller ? 'Yes' : 'No',
-          reviewCount: reviews,
-          rankText: rankText
+          bestsellerBadge: isBS ? 'Yes' : 'No',
+          reviewCount: reviewCount,
+          bigRank: bigRank,
+          smallRank: smallRank
         };
       });
-
       return data;
     } catch (error) {
       return null;
