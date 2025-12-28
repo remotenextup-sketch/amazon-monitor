@@ -20,26 +20,12 @@ export default class GoogleSheets {
 
   async getConfigRows() {
     const sheet = this.doc.sheetsByTitle['設定'];
-    await sheet.loadCells(); // セルを読み込む
     const rows = await sheet.getRows();
-    
-    // row.toObject() で取れない場合に備え、生データからマッピング
-    return rows.map(row => {
-      const data = row.toObject();
-      return {
-        '商品名': data['商品名'] || row._rawData[0],
-        '自社ASIN': data['自社ASIN'] || row._rawData[1],
-        '競合ASIN1': data['競合ASIN1'] || row._rawData[2],
-        '競合ASIN2': data['競合ASIN2'] || row._rawData[3],
-        'Active': data['Active'] || row._rawData[4]
-      };
-    });
+    return rows.map(row => row.toObject());
   }
 
   async appendHistory(results) {
     const sheet = this.doc.sheetsByTitle['履歴'];
-    
-    // 履歴シートのヘッダー順序に厳密に合わせる
     const rows = results.map(res => ({
       'タイムスタンプ': res.date,
       '商品名': res.keyword,
@@ -49,9 +35,7 @@ export default class GoogleSheets {
       'ベストセラーバッジ': res.bestsellerBadge,
       'レビュー数': res.reviewCount,
       'タイプ': res.type
-      // 小カテ・大カテ・ステータス・スコアは今回取得していないので空欄になります
     }));
-
     await sheet.addRows(rows);
   }
 }
