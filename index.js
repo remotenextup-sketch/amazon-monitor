@@ -1,94 +1,78 @@
-import { chromium } from 'playwright';
+import 'dotenv/config';
+import GoogleSheets from './google-sheets.js';
+import AmazonScraper from './amazon-scraper.js';
+import { sendChatworkNotification } from './chatwork.js';
 
-export default class AmazonScraper {
-  constructor() {
-    this.browser = null;
-    this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-  }
+console.log('--- プログラム開始直後 ---');
 
-  async initialize() {
-    try {
-      this.browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
-      });
-      return true;
-    } catch (e) {
-      return false;
+async function main() {
+  console.log('🚀 Amazon Monitor 起動');
+  
+  const sheets = new GoogleSheets();
+  const scraper = new AmazonScraper();
+
+  try {
+    console.log('📡 Google Sheets 初期化開始...');
+    await sheets.initialize();
+    console.log('✓ Google Sheets 接続成功');
+
+    const rows = await sheets.getConfigRows();
+    console.log(`📊 スプレッドシートから ${rows.length} 行読み込みました`);
+
+    const activeRows = rows.filter(row => String(row['Active']).trim() === '有効');
+    console.log(`✅ 有効なデータ: ${activeRows.length} 件`);
+
+    if (activeRows.length === 0) {
+      console.log('⚠ 有効なデータがないため終了します');
+      return;
     }
-  }
 
-  async getMultipleProductsInfo(asinList, searchUrl) {
-    const context = await this.browser.newContext({ 
-      userAgent: this.userAgent, 
-      locale: 'ja-JP',
-      viewport: { width: 1920, height: 1080 }
-    });
-    const page = await context.newPage();
-    const results = {};
-
-    try {
-      console.log(`📡 検索開始: ${searchUrl}`);
-      await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
-      
-      // 画面全体を読み込ませるためのスクロール
-      await page.evaluate(async () => {
-        await new Promise(resolve => {
-          let totalHeight = 0;
-          let distance = 600;
-          let timer = setInterval(() => {
-            window.scrollBy(0, distance);
-            totalHeight += distance;
-            if(totalHeight >= document.body.scrollHeight || totalHeight > 6000){
-              clearInterval(timer);
-              resolve();
-            }
-          }, 150);
-        });
-      });
-
-      await page.waitForTimeout(2000);
-
-      // ページ内の全商品タイルを取得
-      const pageData = await page.evaluate((asins) => {
-        const foundData = {};
-        const cards = Array.from(document.querySelectorAll('.s-result-item, [data-asin]'));
-        
-        asins.forEach(targetAsin => {
-          const item = cards.find(el => {
-            const attrAsin = el.getAttribute('data-asin');
-            return (attrAsin && attrAsin.toUpperCase() === targetAsin.toUpperCase()) || el.innerHTML.includes(targetAsin);
-          });
-
-          if (item) {
-            const priceEl = item.querySelector('.a-price-whole');
-            const badgeEl = item.querySelector('.a-badge-text') || item.innerText.includes('ベストセラー');
-            const reviewEl = item.querySelector('span.a-size-base.s-underline-text');
-            const titleEl = item.querySelector('h2 a span');
-
-            foundData[targetAsin] = {
-              productName: titleEl ? titleEl.innerText.trim() : '商品名不明',
-              price: priceEl ? priceEl.innerText.replace(/[^0-9]/g, '') : '0',
-              bestsellerBadge: badgeEl ? 'Yes' : 'No',
-              reviewCount: reviewEl ? reviewEl.innerText.replace(/[^0-9]/g, '') : '0'
-            };
-          }
-        });
-        return foundData;
-      }, asinList);
-
-      Object.assign(results, pageData);
-
-    } catch (error) {
-      console.error(`⚠️ スクレイピングエラー:`, error.message);
-    } finally {
-      await page.close();
-      await context.close();
+    console.log('🌐 ブラウザ起動開始...');
+    if (!(await scraper.initialize())) {
+      console.log('❌ ブラウザ起動失敗');
+      return;
     }
-    return results;
-  }
 
-  async close() {
-    if (this.browser) await this.browser.close();
+    const allResults = [];
+    for (const row of activeRows) {
+      const keyword = row['商品名'];
+      const targetAsins = [
+        { type: '自社', id: row['自社ASIN'] },
+        { type: '競合1', id: row['競合ASIN1'] },
+        { type: '競合2', id: row['競合ASIN2'] }
+      ].filter(item => item.id);
+
+      const searchUrl = `https://www.amazon.co.jp/s?k=${encodeURIComponent(keyword)}`;
+      console.log(`🔎 調査開始: ${keyword}`);
+
+      const resultsMap = await scraper.getMultipleProductsInfo(targetAsins.map(a => a.id), searchUrl);
+
+      for (const target of targetAsins) {
+        const data = resultsMap[target.id] || { productName: '検索結果に不在', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
+        allResults.push({
+          date: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+          keyword: keyword,
+          type: target.type,
+          asin: target.id,
+          ...data
+        });
+        console.log(`   [${target.type}] ${target.id}: ${data.price}円`);
+      }
+    }
+
+    if (allResults.length > 0) {
+      console.log('📝 スプレッドシートへ書き込み中...');
+      await sheets.appendHistory(allResults);
+      console.log('✓ 書き込み完了');
+      await sendChatworkNotification(`【Amazon監視】${allResults.length}件の調査を完了しました。`);
+    }
+
+  } catch (error) {
+    console.error('❌ メインプロセスエラー:', error);
+  } finally {
+    await scraper.close();
+    console.log('🏁 すべて終了');
   }
 }
+
+main().catch(err => console.error('致命的エラー:', err));
