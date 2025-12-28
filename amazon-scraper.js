@@ -31,7 +31,7 @@ export default class AmazonScraper {
       locale: 'ja-JP'
     });
     const page = await context.newPage();
-    const url = `https://www.amazon.co.jp/dp/${asin}/?th=1&psc=1`; // パラメータを付けて自然に見せる
+    const url = `https://www.amazon.co.jp/s?k=${asin}&ref=nb_sb_noss`;
 
     try {
       // 1. ページ移動
