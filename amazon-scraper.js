@@ -10,74 +10,88 @@ export default class AmazonScraper {
     try {
       this.browser = await chromium.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
       });
       return true;
     } catch (e) {
-      console.error('ブラウザ起動失敗:', e);
       return false;
     }
   }
 
   async getProductInfo(asin, searchUrl) {
-    const context = await this.browser.newContext({ userAgent: this.userAgent, locale: 'ja-JP' });
+    const context = await this.browser.newContext({ 
+      userAgent: this.userAgent, 
+      locale: 'ja-JP',
+      viewport: { width: 1920, height: 1080 } // 画面を広くして全ての商品をロードさせる
+    });
     const page = await context.newPage();
 
     try {
-      console.log(`📡 検索中: ${searchUrl}`);
+      console.log(`📡 検索開始: ${searchUrl}`);
       await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
-      await page.waitForTimeout(3000); // 描画を待つ
+      
+      // 画面を少しずつスクロールして、遅延読み込みされている商品を表示させる
+      await page.evaluate(async () => {
+        await new Promise(resolve => {
+          let totalHeight = 0;
+          let distance = 400;
+          let timer = setInterval(() => {
+            window.scrollBy(0, distance);
+            totalHeight += distance;
+            if(totalHeight >= document.body.scrollHeight || totalHeight > 5000){
+              clearInterval(timer);
+              resolve();
+            }
+          }, 100);
+        });
+      });
 
-      let productData = await page.evaluate((targetAsin) => {
-        // 全ての商品タイル（広告枠含む）を広く取得
-        const cards = Array.from(document.querySelectorAll('.s-result-item, [data-component-type="s-search-result"], .s-card-container'));
-        
-        // 枠内のHTMLにターゲットASINが含まれているものを探す
-        const item = cards.find(el => el.innerHTML.includes(targetAsin));
-        
-        if (!item) return null;
+      await page.waitForTimeout(2000);
 
-        // 値を取得するための汎用関数
-        const getT = (parent, selectors) => {
-          for (const s of selectors) {
-            const el = parent.querySelector(s);
-            if (el && el.innerText.trim()) return el.innerText.trim();
+      const productData = await page.evaluate((targetAsin) => {
+        // 全てのHTML要素の中からASINという文字列を持つものを探す
+        const allElements = Array.from(document.querySelectorAll('.s-result-item'));
+        
+        for (const el of allElements) {
+          // data-asin属性、もしくはHTMLの中身自体にASINが含まれているかチェック
+          if (el.getAttribute('data-asin')?.toUpperCase() === targetAsin.toUpperCase() || el.innerHTML.includes(targetAsin)) {
+            
+            // 価格の抽出（複数のセレクタを試す）
+            const priceEl = el.querySelector('.a-price-whole') || el.querySelector('.a-color-base');
+            const price = priceEl ? priceEl.innerText.replace(/[^0-9]/g, '') : '0';
+
+            // バッジの判定
+            const hasBadge = el.innerText.includes('ベストセラー') || !!el.querySelector('.a-badge-text');
+
+            // レビュー数
+            const reviewEl = el.querySelector('span.a-size-base.s-underline-text');
+            const reviews = reviewEl ? reviewEl.innerText.replace(/[^0-9]/g, '') : '0';
+
+            // タイトル
+            const titleEl = el.querySelector('h2 a span') || el.querySelector('.a-size-medium');
+
+            return {
+              productName: titleEl ? titleEl.innerText.trim() : '商品名取得失敗',
+              price: price,
+              bestsellerBadge: hasBadge ? 'Yes' : 'No',
+              reviewCount: reviews
+            };
           }
-          return '';
-        };
-
-        return {
-          productName: getT(item, ['h2 a span', '.a-size-medium', '.a-size-base-plus']) || 'N/A',
-          price: getT(item, ['.a-price-whole'])?.replace(/[^0-9]/g, '') || '0',
-          bestsellerBadge: (item.querySelector('.a-badge-text') || item.innerText.includes('ベストセラー')) ? 'Yes' : 'No',
-          reviewCount: getT(item, ['span.a-size-base.s-underline-text', '.a-size-small .a-size-base'])?.replace(/[^0-9]/g, '') || '0'
-        };
+        }
+        return null;
       }, asin);
 
-      // バックアップ：見つからない場合は個別ページへ
-      if (!productData) {
-        console.log(`⚠️ 検索結果に見当たらないため、個別ページを試行: ${asin}`);
-        await page.goto(`https://www.amazon.co.jp/dp/${asin}`, { waitUntil: 'load' });
-        await page.waitForTimeout(2000);
-        
-        productData = await page.evaluate(() => {
-          const title = document.querySelector('#productTitle')?.innerText.trim();
-          if (!title || title.includes('Robot Check')) return null;
-
-          return {
-            productName: title,
-            price: document.querySelector('.a-price-whole')?.innerText.replace(/[^0-9]/g, '') || '0',
-            bestsellerBadge: document.body.innerText.includes('ベストセラー') ? 'Yes' : 'No',
-            reviewCount: document.querySelector('#acrCustomerReviewText')?.innerText.replace(/[^0-9]/g, '') || '0'
-          };
-        });
+      if (productData) {
+        console.log(`✅ 発見: ${asin} - ￥${productData.price}`);
+        return productData;
+      } else {
+        console.log(`❌ 不在: ${asin} (1ページ目に見当たりません)`);
+        return { productName: '検索結果に不在', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
       }
 
-      return productData;
-
     } catch (error) {
-      console.error(`✗ エラー発生 (${asin}):`, error.message);
-      return null;
+      console.error(`⚠️ エラー: ${asin}`, error.message);
+      return { productName: '通信エラー', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
     } finally {
       await page.close();
       await context.close();
