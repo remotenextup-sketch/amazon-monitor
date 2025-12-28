@@ -1,3 +1,4 @@
+// amazon-scraper.js
 import { chromium } from 'playwright';
 
 export default class AmazonScraper {
@@ -7,16 +8,8 @@ export default class AmazonScraper {
   }
 
   async initialize() {
-    try {
-      this.browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
-      });
-      return true;
-    } catch (e) {
-      console.error('ブラウザ起動失敗:', e);
-      return false;
-    }
+    this.browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+    return true;
   }
 
   async getProductInfo(asin, searchUrl) {
@@ -24,42 +17,44 @@ export default class AmazonScraper {
     const page = await context.newPage();
 
     try {
-      console.log(`📡 アクセス中: ${searchUrl}`);
+      console.log(`📡 検索中: ${searchUrl}`);
       await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
-      await page.waitForTimeout(3000); // 描画待ち
+      await page.waitForTimeout(2000);
 
-      const productData = await page.evaluate((targetAsin) => {
-        // 全ての商品ブロックを取得
+      let productData = await page.evaluate((targetAsin) => {
         const items = Array.from(document.querySelectorAll('[data-asin]'));
-        // 指定したASINと一致するタイルを探す
         const item = items.find(el => el.getAttribute('data-asin')?.toUpperCase() === targetAsin.toUpperCase());
-
         if (!item) return null;
 
-        // --- 検索結果画面専用のセレクタ ---
-        const titleEl = item.querySelector('h2 a span');
-        const priceEl = item.querySelector('.a-price-whole');
-        const badgeEl = item.querySelector('.a-badge-text');
-        const reviewEl = item.querySelector('span.a-size-base.s-underline-text');
-
         return {
-          productName: titleEl?.innerText.trim() || 'N/A',
-          price: priceEl?.innerText.replace(/[^0-9]/g, '') || '0',
-          bestsellerBadge: (badgeEl || item.innerText.includes('ベストセラー')) ? 'Yes' : 'No',
-          reviewCount: reviewEl?.innerText.replace(/[^0-9]/g, '') || '0'
+          productName: item.querySelector('h2 a span')?.innerText.trim() || 'N/A',
+          price: item.querySelector('.a-price-whole')?.innerText.replace(/[^0-9]/g, '') || '0',
+          bestsellerBadge: item.innerText.includes('ベストセラー') ? 'Yes' : 'No',
+          reviewCount: item.querySelector('span.a-size-base.s-underline-text')?.innerText.replace(/[^0-9]/g, '') || '0'
         };
       }, asin);
 
-      if (productData) {
-        console.log(`✓ 抽出成功: ${productData.productName} (￥${productData.price})`);
-        return productData;
-      } else {
-        console.log(`✗ 検索結果内に ASIN:${asin} が見つかりませんでした。`);
-        return { productName: '検索結果に不在', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
+      // 💡 1ページ目に見つからない場合、直接商品ページへ（バックアップ）
+      if (!productData) {
+        console.log(`⚠️ 検索結果に不在のため直行します: https://www.amazon.co.jp/dp/${asin}`);
+        await page.goto(`https://www.amazon.co.jp/dp/${asin}`, { waitUntil: 'load' });
+        
+        productData = await page.evaluate(() => {
+          const title = document.querySelector('#productTitle')?.innerText.trim();
+          if (!title || title.includes('Robot Check')) return null;
+
+          return {
+            productName: title,
+            price: document.querySelector('.a-price-whole')?.innerText.replace(/[^0-9]/g, '') || '0',
+            bestsellerBadge: document.body.innerText.includes('ベストセラー') ? 'Yes' : 'No',
+            reviewCount: document.querySelector('#acrCustomerReviewText')?.innerText.replace(/[^0-9]/g, '') || '0'
+          };
+        });
       }
 
+      return productData || { productName: '取得失敗(要確認)', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
+
     } catch (error) {
-      console.error(`✗ エラー: ${error.message}`);
       return { productName: 'エラー', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
     } finally {
       await page.close();
@@ -67,7 +62,5 @@ export default class AmazonScraper {
     }
   }
 
-  async close() {
-    if (this.browser) await this.browser.close();
-  }
+  async close() { if (this.browser) await this.browser.close(); }
 }
