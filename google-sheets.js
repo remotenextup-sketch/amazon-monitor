@@ -1,4 +1,3 @@
-// google-sheets.js
 import { JWT } from 'google-auth-library';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 
@@ -14,6 +13,7 @@ export default class GoogleSheets {
       key: creds.private_key.replace(/\\n/g, '\n'),
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
+
     this.doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID, serviceAccountAuth);
     await this.doc.loadInfo();
   }
@@ -26,7 +26,8 @@ export default class GoogleSheets {
 
   async appendHistory(results) {
     const sheet = this.doc.sheetsByTitle['履歴'];
-    // スプシのヘッダー名に完全に合わせる
+    
+    // スプシのヘッダー名と完全一致させる
     const rows = results.map(res => ({
       'タイムスタンプ': res.date,
       '商品名': res.keyword, // スプシ上の管理名
@@ -37,6 +38,7 @@ export default class GoogleSheets {
       'レビュー数': res.reviewCount,
       'タイプ': res.type
     }));
+
     await sheet.addRows(rows);
   }
 }
