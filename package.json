@@ -2,12 +2,13 @@
   "name": "amazon-monitor",
   "version": "1.0.0",
   "type": "module",
-  "main": "index.js",
   "dependencies": {
     "dotenv": "^16.4.5",
     "google-auth-library": "^9.14.2",
     "google-spreadsheet": "^5.0.2",
     "node-fetch": "^3.3.2",
-    "playwright": "^1.47.0"
+    "playwright": "^1.47.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
