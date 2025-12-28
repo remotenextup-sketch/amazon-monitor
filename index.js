@@ -1,73 +1,94 @@
-import GoogleSheets from './google-sheets.js';
-import AmazonScraper from './amazon-scraper.js';
-import { sendChatworkNotification } from './chatwork.js';
-import 'dotenv/config';
+import { chromium } from 'playwright';
 
-async function main() {
-  console.log('🚀 Amazon Monitor 起動');
-  
-  const sheets = new GoogleSheets();
-  const scraper = new AmazonScraper();
+export default class AmazonScraper {
+  constructor() {
+    this.browser = null;
+    this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+  }
 
-  try {
-    // 1. スプレッドシートから設定読み込み
-    await sheets.initialize();
-    const rows = await sheets.getConfigRows(); // Active列が「有効」な行を取得する想定
-    console.log('✓ Google Sheets 接続成功');
+  async initialize() {
+    try {
+      this.browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
 
-    // 2. ブラウザ起動
-    if (!(await scraper.initialize())) return;
+  async getMultipleProductsInfo(asinList, searchUrl) {
+    const context = await this.browser.newContext({ 
+      userAgent: this.userAgent, 
+      locale: 'ja-JP',
+      viewport: { width: 1920, height: 1080 }
+    });
+    const page = await context.newPage();
+    const results = {};
 
-    const allResults = [];
+    try {
+      console.log(`📡 検索開始: ${searchUrl}`);
+      await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      
+      // 画面全体を読み込ませるためのスクロール
+      await page.evaluate(async () => {
+        await new Promise(resolve => {
+          let totalHeight = 0;
+          let distance = 600;
+          let timer = setInterval(() => {
+            window.scrollBy(0, distance);
+            totalHeight += distance;
+            if(totalHeight >= document.body.scrollHeight || totalHeight > 6000){
+              clearInterval(timer);
+              resolve();
+            }
+          }, 150);
+        });
+      });
 
-    for (const row of rows) {
-      if (row['Active'] !== '有効') continue;
+      await page.waitForTimeout(2000);
 
-      const keyword = row['商品名'];
-      const targetAsins = [
-        { type: '自社', id: row['自社ASIN'] },
-        { type: '競合1', id: row['競合ASIN1'] },
-        { type: '競合2', id: row['競合ASIN2'] }
-      ];
-
-      // 💡 キーワードから検索URLを生成
-      const searchUrl = `https://www.amazon.co.jp/s?k=${encodeURIComponent(keyword)}`;
-      console.log(`--- 監視キーワード: ${keyword} ---`);
-
-      for (const target of targetAsins) {
-        if (!target.id) continue;
-
-        console.log(`🔎 調査中: ${target.type} (${target.id})`);
-        const data = await scraper.getProductInfo(target.id, searchUrl);
-
-        if (data) {
-          allResults.push({
-            date: new Date().toLocaleString('ja-JP'),
-            keyword: keyword,
-            type: target.type,
-            asin: target.id,
-            ...data
+      // ページ内の全商品タイルを取得
+      const pageData = await page.evaluate((asins) => {
+        const foundData = {};
+        const cards = Array.from(document.querySelectorAll('.s-result-item, [data-asin]'));
+        
+        asins.forEach(targetAsin => {
+          const item = cards.find(el => {
+            const attrAsin = el.getAttribute('data-asin');
+            return (attrAsin && attrAsin.toUpperCase() === targetAsin.toUpperCase()) || el.innerHTML.includes(targetAsin);
           });
-        }
-      }
+
+          if (item) {
+            const priceEl = item.querySelector('.a-price-whole');
+            const badgeEl = item.querySelector('.a-badge-text') || item.innerText.includes('ベストセラー');
+            const reviewEl = item.querySelector('span.a-size-base.s-underline-text');
+            const titleEl = item.querySelector('h2 a span');
+
+            foundData[targetAsin] = {
+              productName: titleEl ? titleEl.innerText.trim() : '商品名不明',
+              price: priceEl ? priceEl.innerText.replace(/[^0-9]/g, '') : '0',
+              bestsellerBadge: badgeEl ? 'Yes' : 'No',
+              reviewCount: reviewEl ? reviewEl.innerText.replace(/[^0-9]/g, '') : '0'
+            };
+          }
+        });
+        return foundData;
+      }, asinList);
+
+      Object.assign(results, pageData);
+
+    } catch (error) {
+      console.error(`⚠️ スクレイピングエラー:`, error.message);
+    } finally {
+      await page.close();
+      await context.close();
     }
+    return results;
+  }
 
-    // 3. スプレッドシートの「履歴」シートに保存
-    if (allResults.length > 0) {
-      await sheets.appendHistory(allResults);
-      console.log(`✓ ${allResults.length}件のデータを記録しました`);
-
-      // 4. Chatwork通知 (任意でカスタマイズ)
-      const summary = allResults.map(r => `${r.keyword}(${r.type}): ￥${r.price} バッジ:${r.bestsellerBadge}`).join('\n');
-      await sendChatworkNotification(`【Amazon調査完了】\n${summary}`);
-    }
-
-  } catch (error) {
-    console.error('メインプロセスでエラー発生:', error);
-  } finally {
-    await scraper.close();
-    console.log('🏁 すべてのプロセスが終了しました');
+  async close() {
+    if (this.browser) await this.browser.close();
   }
 }
-
-main();
