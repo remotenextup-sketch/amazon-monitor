@@ -1,3 +1,4 @@
+
 import { chromium } from 'playwright';
 
 export default class AmazonScraper {
@@ -14,66 +15,63 @@ export default class AmazonScraper {
   }
 
   async getProductInfo(asin) {
-    // 日本語環境をシミュレート
-    const context = await this.browser.newContext({
-      userAgent: this.userAgent,
-      locale: 'ja-JP',
-      viewport: { width: 1280, height: 800 }
-    });
+    const context = await this.browser.newContext({ userAgent: this.userAgent, locale: 'ja-JP' });
     const page = await context.newPage();
 
     try {
-      // 1. まずAmazonトップを開いて配送先を設定する
-      console.log(`📍 配送先を日本に設定中...`);
-      await page.goto('https://www.amazon.co.jp/', { waitUntil: 'networkidle' });
-      
-      // 配送先変更ボタンをクリックして100-0001を入力
-      try {
-        await page.click('#nav-global-location-slot', { timeout: 5000 });
-        await page.waitForSelector('#GLUXZipUpdateInput', { timeout: 5000 });
-        await page.fill('#GLUXZipUpdateInput', '1000001'); // 東京の郵便番号
-        await page.click('#GLUXZipUpdate .a-button-input');
-        await page.waitForTimeout(2000); // 反映待ち
-        await page.reload(); // 設定反映のためにリロード
-      } catch (e) {
-        console.log("配送先設定スキップ（既に日本設定の可能性あり）");
-      }
+      // 💡 商品ページではなく、SEO順位取得と同じ「検索画面」へ
+      // 検索ワードをASINにすることで、確実にその商品をヒットさせる
+      const url = `https://www.amazon.co.jp/s?k=${asin}`;
+      console.log(`🔎 検索画面から情報を抽出中: ${url}`);
 
-      // 2. ASINで検索
-      const url = `https://www.amazon.co.jp/s?k=${asin}&ref=nb_sb_noss`;
-      console.log(`🔎 検索実行: ${url}`);
-      await page.goto(url, { waitUntil: 'networkidle' });
-      await page.waitForTimeout(3000);
+      await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000); 
 
-      // 3. データ抽出
       const productData = await page.evaluate((targetAsin) => {
+        // 全ての商品ブロックを取得
         const items = Array.from(document.querySelectorAll('[data-asin]'));
+        // 対象のASINを持つブロックを特定
         const item = items.find(el => el.getAttribute('data-asin')?.toUpperCase() === targetAsin.toUpperCase());
 
         if (!item) return null;
 
+        // --- 検索結果画面専用のセレクタで抽出 ---
+        
+        // 1. タイトル
+        const titleEl = item.querySelector('h2 a span');
+        const productName = titleEl?.innerText.trim() || 'N/A';
+
+        // 2. 価格 (.a-price-whole は検索画面でも共通)
+        const priceEl = item.querySelector('.a-price-whole');
+        const price = priceEl?.innerText.replace(/[^0-9]/g, '') || '0';
+
+        // 3. ベストセラーバッジ
+        // 検索画面では 'a-badge-text' クラスによく入っています
+        const badgeEl = item.querySelector('.a-badge-text');
+        const hasBadge = !!(badgeEl || item.innerText.includes('ベストセラー') || item.innerText.includes('Bestseller'));
+
+        // 4. レビュー数
+        const reviewEl = item.querySelector('span.a-size-base.s-underline-text');
+        const reviewCount = reviewEl?.innerText.replace(/[^0-9]/g, '') || '0';
+
         return {
-          productName: item.querySelector('h2 a span')?.innerText.trim() || 'N/A',
-          price: item.querySelector('.a-price-whole')?.innerText.replace(/[^0-9]/g, '') || '0',
-          bestsellerBadge: item.innerText.includes('ベストセラー') || item.innerText.includes('Bestseller') ? 'Yes' : 'No',
-          reviewCount: item.querySelector('span.a-size-base.s-underline-text')?.innerText.replace(/[^0-9]/g, '') || '0'
+          productName,
+          price,
+          bestsellerBadge: hasBadge ? 'Yes' : 'No',
+          reviewCount
         };
       }, asin);
 
-      if (productData && productData.productName !== 'N/A') {
-        console.log(`✓ 抽出成功: ${productData.productName}`);
+      if (productData) {
+        console.log(`✓ 抽出成功: ${productData.productName} / 価格: ${productData.price}`);
         return productData;
+      } else {
+        // 検索で出ない場合の最終バックアップ（一応詳細ページも試す）
+        console.log(`⚠️ 検索結果にASINが見つかりません。詳細ページを試行します。`);
+        await page.goto(`https://www.amazon.co.jp/dp/${asin}`, { waitUntil: 'load' });
+        const title = await page.title();
+        return { productName: title.includes('Amazon.co.jp') ? '取得失敗(ボット検知)' : title, price: '0', bestsellerBadge: 'No', reviewCount: '0' };
       }
-
-      // 4. 検索でダメなら最終手段：商品ページ直撃
-      console.log(`⚠️ 検索失敗。商品詳細ページを直接試行します...`);
-      await page.goto(`https://www.amazon.co.jp/dp/${asin}`, { waitUntil: 'networkidle' });
-      // (詳細ページ用の抽出ロジックは前のバージョンと同様...)
-      // ここはシンプルに「タイトルが取れるか」だけ確認
-      const directTitle = await page.title();
-      console.log(`[DEBUG] 直撃後のページタイトル: ${directTitle}`);
-
-      return { productName: '取得失敗', price: '0', bestsellerBadge: 'No', reviewCount: '0' };
 
     } catch (error) {
       console.error(`✗ エラー: ${error.message}`);
