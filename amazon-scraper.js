@@ -10,11 +10,7 @@ export default class AmazonScraper {
     try {
       this.browser = await chromium.launch({
         headless: true,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--no-sandbox',
-          '--disable-setuid-sandbox'
-        ]
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox']
       });
       console.log('✓ Playwrightブラウザ起動');
       return true;
@@ -25,15 +21,10 @@ export default class AmazonScraper {
   }
 
   async close() {
-    if (this.browser) {
-      await this.browser.close();
-      console.log('✓ ブラウザ終了');
-    }
+    if (this.browser) await this.browser.close();
   }
 
   async getProductInfo(asin) {
-    if (!this.browser) return null;
-
     const context = await this.browser.newContext({ userAgent: this.userAgent });
     const page = await context.newPage();
 
@@ -41,9 +32,9 @@ export default class AmazonScraper {
       const url = `https://www.amazon.co.jp/dp/${asin}`;
       console.log(`📍 アクセス: ${url}`);
 
-      // 読み込み待ちの設定
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await page.waitForTimeout(4000); // 描画までしっかり待つ
+      // タイムアウトを長めに設定し、完全に読み込む
+      await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000); 
 
       const productData = await page.evaluate(() => {
         const getT = (selectors) => {
@@ -54,45 +45,53 @@ export default class AmazonScraper {
           return '';
         };
 
-        // 1. 商品名 (複数の候補から探す)
-        const productName = getT(['#productTitle', '.qa-title-text', 'h1', '.a-size-large']);
+        // 1. 商品名 (h1 span と既存の候補)
+        const productName = getT(['h1 span', '#productTitle', '.a-size-large']);
 
-        // 2. 価格 (複数の候補から数字だけ抜く)
-        const rawPrice = getT([
-          '.a-price-whole', 
-          '#priceblock_ourprice', 
-          '#priceblock_dealprice',
-          '.a-offscreen',
-          '.priceToPay'
-        ]);
-        const price = rawPrice.replace(/[^0-9]/g, '') || '0';
+        // 2. 価格 (整数部と小数部を合体させる最新方式)
+        const whole = document.querySelector('.a-price-whole')?.innerText.trim() || '';
+        const fraction = document.querySelector('.a-price-fraction')?.innerText.trim() || '';
+        const symbol = document.querySelector('.a-price-symbol')?.innerText.trim() || '';
+        
+        // 数字だけを抽出（USD 18.25 -> 18.25 / ￥1,980 -> 1980）
+        let price = (whole + fraction).replace(/[^0-9.]/g, '');
+        if (!price) {
+          // 従来の価格セレクタも予備でチェック
+          price = getT(['.a-offscreen', '#priceblock_ourprice']).replace(/[^0-9]/g, '');
+        }
 
-        // 3. ベストセラーバッジ
-        // 特定の要素があるか、またはテキスト内に「ベストセラー」が含まれるか
-        const bBadge = !!(
-          document.querySelector('.badge-link') || 
-          document.querySelector('.p13n-best-seller-badge') || 
-          document.body.innerText.includes('ベストセラー')
-        );
+        // 3. ベストセラーバッジ (日本語・英語両対応)
+        const bodyText = document.body.innerText;
+        const hasBestSeller = /Amazon Bestseller|ベストセラー/i.test(bodyText) || 
+                              !!document.querySelector('.rio-badge-style-best_seller');
 
         // 4. レビュー数
-        const reviewText = getT(['#acrCustomerReviewText', '[data-hook="total-review-count"]']);
+        const reviewText = getT(['[data-hook="total-review-count"]', '#acrCustomerReviewText']);
         const reviewCount = reviewText.replace(/[^0-9]/g, '') || '0';
 
-        // 5. ランキング (正規表現で「数字+位」を抜く)
+        // 5. ランキング (正規表現で #1 や #77 を抽出)
+        const rankingMatches = bodyText.match(/#(\d+)\s+in\s+([^\n]+)/g);
         let smallRank = 'N/A';
         let largeRank = 'N/A';
-        const bodyText = document.body.innerText;
-        const rankMatches = bodyText.match(/(\d+)位/g);
-        if (rankMatches) {
-          largeRank = rankMatches[0].replace('位', '');
-          if (rankMatches[1]) smallRank = rankMatches[1].replace('位', '');
+
+        if (rankingMatches) {
+          largeRank = rankingMatches[0].match(/#(\d+)/)?.[1] || 'N/A';
+          if (rankingMatches[1]) {
+            smallRank = rankingMatches[1].match(/#(\d+)/)?.[1] || 'N/A';
+          }
+        } else {
+          // 日本語形式の「n位」も予備でチェック
+          const jpRankMatches = bodyText.match(/(\d+)位/g);
+          if (jpRankMatches) {
+            largeRank = jpRankMatches[0].replace('位', '');
+            if (jpRankMatches[1]) smallRank = jpRankMatches[1].replace('位', '');
+          }
         }
 
         return {
           productName: productName || 'N/A',
-          price,
-          bestsellerBadge: bBadge ? 'Yes' : 'No',
+          price: price || '0',
+          bestsellerBadge: hasBestSeller ? 'Yes' : 'No',
           reviewCount,
           smallCategoryRank: smallRank,
           largeCategoryRank: largeRank
