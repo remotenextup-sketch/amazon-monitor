@@ -1,64 +1,72 @@
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-extra';
+import stealth from 'puppeteer-extra-plugin-stealth';
+
+chromium.use(stealth());
 
 export default class AmazonScraper {
   constructor() {
     this.browser = null;
-    this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
   }
 
   async initialize() {
     try {
       this.browser = await chromium.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--lang=ja-JP,ja'
+        ]
       });
       return true;
     } catch (e) { return false; }
   }
 
   async getProductInfo(asin) {
-    const context = await this.browser.newContext({ userAgent: this.userAgent, locale: 'ja-JP' });
+    // 毎回新しい指紋（Context）を作成して追跡を逃れる
+    const context = await this.browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+      locale: 'ja-JP'
+    });
     const page = await context.newPage();
-    const url = `https://www.amazon.co.jp/dp/${asin}`;
+    const url = `https://www.amazon.co.jp/dp/${asin}/?th=1&psc=1`; // パラメータを付けて自然に見せる
 
     try {
-      await page.goto(url, { waitUntil: 'load', timeout: 60000 });
-      await page.waitForTimeout(2000);
+      // 1. ページ移動
+      await page.goto(url, { waitUntil: 'commit', timeout: 60000 });
+      await page.waitForTimeout(Math.random() * 3000 + 2000); // 人間味のある待機
 
+      // 2. ロボット画面が出ていないかチェック
+      const isRobot = await page.isVisible('form[action*="/errors/validateCaptcha"]');
+      if (isRobot) {
+        console.log(`⚠️ ${asin}: ロボット検知されました`);
+        return null;
+      }
+
+      // 3. データ抽出
       const data = await page.evaluate(() => {
-        const getT = (s) => document.querySelector(s)?.innerText.trim() || '';
+        const t = (s) => document.querySelector(s)?.innerText.trim() || '';
         
-        // 1. 価格・レビュー
-        const price = getT('.a-price-whole').replace(/[^0-9]/g, '') || '0';
-        const reviewCount = getT('#acrCustomerReviewText').replace(/[^0-9]/g, '') || '0';
+        // 価格（複数の場所を探す）
+        const price = t('.a-price-whole') || t('.a-offscreen') || '0';
         
-        // 2. ベストセラー
-        const isBS = !!document.querySelector('.badge-link') || document.body.innerText.includes('ベストセラー');
-
-        // 3. ランキング抽出 (大・小カテゴリ)
-        const bodyText = document.body.innerText;
-        const rankMatch = bodyText.match(/Amazon 売れ筋ランキング:?\s*([^\n]+)/);
-        let bigRank = '', smallRank = '';
+        // ランキング（詳細欄から正規表現でぶっこ抜く）
+        const text = document.body.innerText;
+        const bigRankMatch = text.match(/#([0-9,]+)\s*位\s*-\s*([^\n(]+)/);
         
-        if (rankMatch) {
-          const lines = bodyText.split('\n');
-          const rankLine = lines.find(l => l.includes(' - ') && l.includes('位'));
-          if (rankLine) {
-            const parts = rankLine.split(' - ');
-            bigRank = parts[0].replace(/[^0-9]/g, '') + '位';
-            smallRank = (parts[1] || '').replace(/[^0-9]/g, '') + '位';
-          }
-        }
-
         return {
-          productName: getT('#productTitle'),
-          price: price,
-          bestsellerBadge: isBS ? 'Yes' : 'No',
-          reviewCount: reviewCount,
-          bigRank: bigRank,
-          smallRank: smallRank
+          productName: t('#productTitle'),
+          price: price.replace(/[^0-9]/g, ''),
+          bestsellerBadge: document.body.innerText.includes('ベストセラー') ? 'Yes' : 'No',
+          reviewCount: t('#acrCustomerReviewText').replace(/[^0-9]/g, '') || '0',
+          bigRank: bigRankMatch ? bigRankMatch[1] + '位' : '',
+          smallRank: text.match(/#([0-9,]+)\s*位\s*-\s*([^\n]+)/g)?.[1]?.replace(/.*#/, '') || ''
         };
       });
+
+      console.log(`✅ ${asin} 取得完了: ${data.productName.substring(0, 10)}...`);
       return data;
     } catch (error) {
       return null;
